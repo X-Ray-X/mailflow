@@ -1,0 +1,8 @@
+# Bootstrap overlay: used only until the server has a configuration file.
+# A fixed bootstrap credential avoids scraping a password printed to stderr.
+# This file is never used for normal operation, which is why the mail service
+# in compose.yaml carries no recovery credential at all.
+services:
+  stalwart:
+    environment:
+      STALWART_RECOVERY_ADMIN: "admin:${MAIL_BOOTSTRAP_PASSWORD:?MAIL_BOOTSTRAP_PASSWORD must be set}"
