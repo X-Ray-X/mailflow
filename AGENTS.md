@@ -56,11 +56,13 @@ Out of scope unless a change says otherwise: public internet mail, MX/SPF/DKIM/D
 
 ## Version control
 
-- End every completed development loop with a commit. A loop is complete when its stated verification has run and its outcome is known; commit then, rather than letting several loops accumulate.
+- Work on a feature branch, named after the OpenSpec change it implements (for example `stalwart-local-environment`). `main` stays deployable and only receives reviewed pull requests; commits go directly to `main` only for repository bootstrap.
+- End every completed development loop with a commit on that branch. A loop is complete when its stated verification has run and its outcome is known; commit then, rather than letting several loops accumulate.
 - One commit per coherent piece of work. Each commit should leave the repository consistent: code, docs, and OpenSpec artifacts agree.
 - The message states what changed and what was verified. If something could not be verified, say so in the message.
+- The pull request description repeats the verification result and the remaining gaps, so review does not depend on reading the commit log.
 - Never commit secrets, `.env`, `data/`, or generated credentials. Review `git status` and the diff first.
-- Do not push, open a pull request, or deploy unless asked. A commit stays local until the user says otherwise.
+- Do not push, open a pull request, merge, or deploy unless asked. Local work stays local until the user says otherwise.
 - Do not amend or rewrite history that has already been pushed.
 
 ## Completion criteria
@@ -72,4 +74,4 @@ Before reporting work as done:
 3. The diff is reviewed for secrets, unbounded retries, unhandled errors, and accidental data loss.
 4. Documentation affected by the change is updated, including client connection details and port maps.
 5. The OpenSpec change reflects what was actually built.
-6. The work is committed locally, with the verification result in the message, or the reason it was not committed is stated.
+6. The work is committed locally on the change's feature branch, with the verification result in the message, or the reason it was not committed is stated.
