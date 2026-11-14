@@ -55,7 +55,10 @@ options:
   to a small Gemini model.
 
 Set `config.model` to your model of choice (the default is `gpt-6.1-sol`);
-`config.fallback_models` holds cheaper fallbacks.
+`config.fallback_models` holds cheaper fallbacks. Model ids need the LiteLLM
+provider prefix: `gemini/gemini-3-flash-preview`, not the bare id, or the
+request is treated as Vertex AI and fails without Google Cloud credentials.
+
 ## What this is
 
 A homelab email platform: a locally hosted mail server for mail between local

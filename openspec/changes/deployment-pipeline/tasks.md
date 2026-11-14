@@ -4,8 +4,13 @@
 
 - [x] 1.1 Write `.github/workflows/ci.yml` with a compose-contract job that
   verifies the render, service inventory, pinned image and published ports.
-- [x] 1.2 The gate uses the same `docker compose` commands as
-  `scripts/verify.sh` (config, ps). Verified against the repository.
+- [x] 1.2 The gate reads only the rendered config (`docker compose config`:
+  services, images, ports), never the live stack, so it tests the pull request
+  rather than the host. Ports are compared in ascending order
+  (`443,465,993,8080`).
+- [ ] 1.3 Confirm the gate passes on PR #1. The first run failed with
+  `IndentationError`: the multi-line Python was indented inside the YAML block
+  scalar. The script is now a single line and asserts the rendered ports.
 
 ## 2. Add the deployment workflow
 
@@ -24,8 +29,11 @@
 - [x] 3.1 Write `.github/workflows/pr-agent.yml` using
   `The-PR-Agent/pr-agent@main` with the GitHub Environment secret
   `GEMINI_API_KEY` (via `GOOGLE_AI_STUDIO.GEMINI_API_KEY`), `GITHUB_TOKEN` and
-  the `github_action_config.*` flags. Uses free-tier Gemini (`gemini-3-flash-preview`)
-  with a lite fallback (`gemini-2.5-flash-lite`).
+  the `github_action_config.*` flags. Uses free-tier Gemini through Google AI
+  Studio: `config.model` must carry the LiteLLM provider prefix
+  (`gemini/gemini-3-flash-preview`), otherwise the bare model id is routed to
+  Vertex AI and fails with `DefaultCredentialsError`. No fallback model is
+  configured (`[]`).
 - [x] 3.2 Add the GitHub Environment secret `GEMINI_API_KEY` (free-tier Google
   AI Studio key). Verify: the workflow references the secret and the gate passes.
 - [x] 3.3 Open a pull request and observe PR-Agent's review/describe/improve

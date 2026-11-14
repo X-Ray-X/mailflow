@@ -27,7 +27,12 @@ jobs:
           # PR-Agent documented config keys, mirrored as environment variables.
           # The dot-keys are valid as Linux runner env var names and map onto
           # the model / behaviour settings.
-          config.model: "gemini-3-flash-preview"
+          #
+          # The provider prefix is required: LiteLLM treats a bare
+          # "gemini-3-flash-preview" as Vertex AI and then fails with
+          # DefaultCredentialsError. "gemini/" routes it to Google AI Studio,
+          # which is what GOOGLE_AI_STUDIO.GEMINI_API_KEY authenticates.
+          config.model: "gemini/gemini-3-flash-preview"
           config.fallback_models: '[]'
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"

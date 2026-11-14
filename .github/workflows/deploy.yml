@@ -68,17 +68,14 @@ jobs:
         run: |
           cd ${{ env.MAIL_COMPOSE_DIR }}
           # published ports must match the documented inventory (no port 25;
-          # admin/JMAP listeners stay on loopback only)
-          expected="993,465,443,8080"
-          actual="$(docker compose ps --format json | python3 -c '
-            import json,sys
-            pub=set()
-            for line in sys.stdin:
-              s=json.loads(line)
-              for p in (s.get("Publishers") or []):
-                if p.get("PublishedPort"): pub.add(int(p["PublishedPort"]))
-            sys.stdout.write(",".join(map(str,sorted(pub))))
-          ')"
+          # admin/JMAP listeners stay on loopback only). Read from the rendered
+          # config so the check is stable across compose versions; the `up -d`
+          # above already made the running stack match it. Keep the Python on
+          # one line: the heredoc-free block is an indented YAML scalar, and a
+          # multi-line -c script would inherit the indentation.
+          expected="443,465,993,8080"  # ascending, as rendered below
+          actual="$(docker compose -f compose.yaml config --format json \
+            | python3 -c 'import json,sys; cfg=json.load(sys.stdin); print(",".join(str(port) for port in sorted({int(p["published"]) for service in cfg["services"].values() for p in service.get("ports", [])})))')"
           test "$actual" = "$expected" \
             || { echo "published ports are '$actual', expected '$expected'"; exit 1; }
 
