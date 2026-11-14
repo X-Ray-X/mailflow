@@ -4,7 +4,7 @@
 
 - [x] 1.1 Identify the current stable Stalwart release and confirm it publishes a native `linux/arm64` image; record the exact tag (and digest if available) in `docs/mail-infrastructure.md`. Verify: `docker buildx imagetools inspect <image>:<tag>` lists `linux/arm64`.
 - [x] 1.2 Read that release's own documentation for every option this change will use (local domain, network listeners, TLS, storage path, account bootstrap) and record each option with a documentation reference. Verify: every option used in configuration appears in the recorded list, and none is copied from another release.
-- [ ] 1.3 Confirm host readiness on the Radxa: Docker with the Compose plugin, tailnet membership, whether tailnet HTTPS certificates are available, and the chosen data path. Verify: `docker compose version` succeeds, `tailscale status` reports the host, and the certificate path (tailnet certificate or internal CA) is recorded as the chosen option.
+- [x] 1.3 Confirm host readiness on the Radxa: Docker with the Compose plugin, tailnet membership, whether tailnet HTTPS certificates are available, and the chosen data path. Verify: `docker compose version` succeeds, `tailscale status` reports the host, and the certificate path (tailnet certificate or internal CA) is recorded as the chosen option. Observed on 2026-11-14: Compose `2.26.1-4`; `tailscale status` reports `rock-5t` on the tailnet; `tailscale status --json` reports `"CertDomains": null`, so tailnet HTTPS certificates are unavailable. Chosen path: the internal CA (`CN=Mailflow Internal CA`, SANs `mail.mailflow.test, mailflow.test`). The configured `MAIL_DATA_DIR` exists, owned `2000:2000`.
 
 ## 2. Deploy the mail infrastructure
 

@@ -17,7 +17,7 @@ against Stalwart `v1.1.0`, unless it appears under [Known gaps](#known-gaps).
 | Image digest | index `sha256:f772aa6e…20837e`, linux/arm64 manifest `sha256:eebae3f4…c5211d` |
 | Domain | `mailflow.test` (reserved, non-routable) |
 | Hostname | `mail.mailflow.test` |
-| Data | host bind mounts under `deploy/mail/data/` (on the runner host: `/home/radxa/repos/mailflow/deploy/mail/data`) |
+| Data | host bind mounts under the path in `MAIL_DATA_DIR` (local default `./data`) |
 | Container user | `2000:2000` (`stalwart`) |
 
 The image publishes a native `linux/arm64` manifest, so it runs without
@@ -26,24 +26,32 @@ emulation on the target Radxa Rock 5T. Verified with
 
 ### Host deployment (CI)
 
-The deployment workflow runs on the self-hosted runner, which is itself a
-container. The host clone `/home/radxa/repos/mailflow` must be mounted into the
-runner at the **same absolute path**. Compose bind mounts are resolved by the
-host Docker daemon, so a path that only exists inside the runner (for example
-the checkout under `/runner/_work`) would silently mount a different directory
-on the host. The workflow refuses to deploy unless
-`/home/radxa/repos/mailflow` appears in `/proc/self/mountinfo`.
+The deployment workflow runs on a self-hosted runner that is itself a
+container. Compose bind mounts are resolved by the host Docker daemon, so the
+data path must exist on the host at the same absolute path the runner sees. A
+path that only exists inside the runner (for example, a checkout in the
+runner's workspace) would silently mount a different, empty directory on the
+host.
 
-`MAIL_DATA_DIR` is therefore set to
-`/home/radxa/repos/mailflow/deploy/mail/data` in CI. The workflow runs
-`bootstrap.sh` with `sudo`, which creates the directory and hands
-`etc/`, `lib/` and `tls/` to uid/gid `2000` so the container can read and write
-them. Operations that read the TLS key or the data tree must use `sudo`.
+`MAIL_DATA_DIR` is therefore a required `production` environment variable, not
+a tracked default: it names the absolute host path. The workflow fails before
+touching the stack if it is unset, relative, or not on a host mount (it
+compares the path's mount point with the runner workspace). It does not
+hardcode the host clone location, so moving the checkout does not require a
+code change.
+
+The workflow runs `bootstrap.sh` with `sudo`, which creates the directory and
+hands `etc/`, `lib/` and `tls/` to uid/gid `2000` so the container can read and
+write them. Operations that read the TLS key or the data tree must use `sudo`.
 
 The runner's loopback is not the host's, so the workflow does not call the
 published setup or management ports directly. `bootstrap.sh`, the HTTPS wait,
 and the certificate SAN check use `docker exec` into `mailflow-stalwart` and
 the container's internal listeners (`8080` and `443`).
+
+`MAIL_TAILNET_IP` is an optional `production` environment variable used only by
+the deploy run summary; the service never reads it. It is a variable rather
+than a secret because the summary prints it, and secrets would be masked.
 
 ## Prerequisites
 
@@ -54,6 +62,14 @@ the container's internal listeners (`8080` and `443`).
   ASN/Geo data from GitHub. Internal mail delivery needs no internet connection
   and no external DNS. The spam classifier model is absent at first start and a
   training task is scheduled; filtering is not tuned or relied on here.
+
+### Host readiness (verified 2026-11-14)
+
+On the deployment host, `docker compose version` reports `2.26.1-4`,
+`tailscale status` reports the host as `rock-5t` on the tailnet, and the
+configured `MAIL_DATA_DIR` exists with `etc/`, `lib/` and `tls/` owned by
+`2000:2000`. The host's tailnet address is supplied by the `MAIL_TAILNET_IP`
+environment variable rather than tracked here.
 
 ## Files
 
@@ -88,7 +104,7 @@ $EDITOR .env            # set passwords; keep the domain and hostname if unchang
 |---|---|
 | `STALWART_IMAGE` | Pinned release. Change only as a deliberate upgrade. |
 | `MAIL_DOMAIN`, `MAIL_HOSTNAME` | Local domain and canonical hostname. |
-| `MAIL_DATA_DIR` | Host data path, default `./data`. |
+| `MAIL_DATA_DIR` | Host data path; local default `./data`, CI requires an absolute host path. |
 | `MAIL_IMAPS_PORT`, `MAIL_SUBMISSION_PORT` | Published client ports. |
 | `MAIL_HTTPS_PORT`, `MAIL_SETUP_PORT` | Loopback admin/JMAP ports. |
 | `MAIL_BOOTSTRAP_PASSWORD` | Fixed credential used only by the first start. |
@@ -188,9 +204,12 @@ sudo security add-trusted-cert -d -r trustRoot \
 Do not disable certificate verification in a client: the contract is verified
 TLS, and the internal CA exists so that verification can stay on.
 
-On the Radxa, the preferred certificate is the tailnet certificate obtained via
-`tailscale cert`, which no client has to trust by hand. That path was **not
-verified** here because no tailnet was available; see [Known gaps](#known-gaps).
+On the Radxa, the preferred certificate would be the tailnet certificate
+obtained via `tailscale cert`, which no client has to trust by hand. It is not
+available on the current tailnet: `tailscale status --json` reports
+`"CertDomains": null`, so HTTPS certificates are not enabled. The internal CA
+is therefore the chosen certificate path for now; see
+[Known gaps](#known-gaps).
 
 ## Accounts
 
@@ -345,11 +364,11 @@ new release migrated data.
 
 ## Known gaps
 
-- **Radxa host readiness** was not verified here: no access to the host, its
-  Docker installation, or its tailnet. The local arm64 container is native, but
-  the host checklist in the change's task 1.3 remains open.
-- **Tailnet certificate** (`tailscale cert`) was not exercised; the internal CA
-  is what was verified.
+- **Tailnet certificate** (`tailscale cert`) is unavailable because the tailnet
+  has HTTPS certificates disabled (`"CertDomains": null`). The internal CA
+  (`CN=Mailflow Internal CA`, SANs `mail.mailflow.test, mailflow.test`) is the
+  chosen path for now. Enabling HTTPS certificates for the tailnet remains the
+  preferred future path.
 - **Desktop and mobile clients** (Thunderbird or Apple Mail, and a phone over the
   tailnet) were not available. Verification used Python's stdlib IMAP/SMTP
   clients, which are real protocol clients but not two distinct client families.

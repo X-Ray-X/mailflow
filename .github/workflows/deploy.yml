@@ -14,10 +14,16 @@ concurrency:
 
 env:
   MAIL_COMPOSE_DIR: deploy/mail
-  # Absolute path on the host. The runner is a container, so this directory
-  # must be mounted into the runner at the same path; otherwise Docker on the
-  # host resolves it somewhere else and the mail data is not persistent.
-  MAIL_DATA_DIR: ${{ vars.MAIL_DATA_DIR || '/home/radxa/repos/mailflow/deploy/mail/data' }}
+  # Absolute host path for the mail data. Required: set it in the "production"
+  # environment. The runner must have this path mounted from the host at the
+  # same absolute path, because Compose bind mounts are resolved by the host
+  # Docker daemon, not by the runner. No default: a tracked default would bake
+  # one host's layout into the repository.
+  MAIL_DATA_DIR: ${{ vars.MAIL_DATA_DIR }}
+  # Optional host address for the run summary only. Set it as a "production"
+  # environment variable; leave it unset and the summary omits it. Not a
+  # secret: it is printed in the summary, and secrets would be masked.
+  MAIL_TAILNET_IP: ${{ vars.MAIL_TAILNET_IP }}
 
 jobs:
   deploy:
@@ -33,21 +39,41 @@ jobs:
         with:
           ref: ${{ github.ref_name }}
 
-      - name: prepare deploy environment from GitHub Environment secrets
+      - name: prepare deploy environment from the production environment
         run: |
           set -euo pipefail
           cd ${{ env.MAIL_COMPOSE_DIR }}
-          # .env.example is names and examples only. The real values live in the
-          # "production" GitHub Environment secrets. Inject only the credential
-          # fields; everything else keeps its tracked default.
+          # .env.example is names and examples only. Credentials come from the
+          # "production" environment secrets; the host data path comes from the
+          # "production" environment variables. Everything else keeps its
+          # tracked default.
           cp .env.example .env
           sed -i "s|^MAIL_BOOTSTRAP_PASSWORD=.*|MAIL_BOOTSTRAP_PASSWORD=${{ secrets.MAIL_BOOTSTRAP_PASSWORD }}|" .env
           sed -i "s|^MAIL_ACCOUNT_ALICE_PASSWORD=.*|MAIL_ACCOUNT_ALICE_PASSWORD=${{ secrets.MAIL_ACCOUNT_ALICE_PASSWORD }}|" .env
           sed -i "s|^MAIL_ACCOUNT_BOB_PASSWORD=.*|MAIL_ACCOUNT_BOB_PASSWORD=${{ secrets.MAIL_ACCOUNT_BOB_PASSWORD }}|" .env
-          # The mail data lives outside the checkout, on a host directory that
-          # is mounted into the runner at the same absolute path.
-          grep -qs ' /home/radxa/repos/mailflow ' /proc/self/mountinfo \
-            || { echo "error: /home/radxa/repos/mailflow is not mounted into the runner"; exit 1; }
+          # The data path is a host path supplied by the "production"
+          # environment. Compose bind mounts are resolved by the host Docker
+          # daemon, so the path must be mounted into the runner at the same
+          # absolute path. Fail before touching anything if it is missing,
+          # relative, or only present on the runner's own filesystem.
+          : "${MAIL_DATA_DIR:?MAIL_DATA_DIR must be set in the production environment}"
+          case "$MAIL_DATA_DIR" in
+            /*) ;;
+            *) echo "error: MAIL_DATA_DIR must be absolute, got '$MAIL_DATA_DIR'"; exit 1 ;;
+          esac
+          data_parent="$(dirname "$MAIL_DATA_DIR")"
+          test -d "$data_parent" \
+            || { echo "error: $data_parent does not exist in the runner; mount the host path"; exit 1; }
+          mount_point="$(stat -c %m "$data_parent")"
+          case "$mount_point" in
+            /|"$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*)
+              echo "error: MAIL_DATA_DIR is not on a host mount (mount point: $mount_point)"; exit 1 ;;
+          esac
+          case "$GITHUB_WORKSPACE/" in
+            "$mount_point"/*)
+              echo "error: MAIL_DATA_DIR is on the runner workspace's mount (mount point: $mount_point)"; exit 1 ;;
+          esac
+
           sed -i "s|^MAIL_DATA_DIR=.*|MAIL_DATA_DIR=${MAIL_DATA_DIR}|" .env
           chmod 600 .env
 
@@ -113,8 +139,13 @@ jobs:
 
       - name: write run summary
         run: |
+          if [ -n "${MAIL_TAILNET_IP:-}" ]; then
+            tailnet="mail.mailflow.test (tailnet IP ${MAIL_TAILNET_IP})"
+          else
+            tailnet="mail.mailflow.test"
+          fi
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           Mailflow deployed from ${{ github.sha }}
-          Tailnet: mail.mailflow.test (radxa tailnet IP 100.98.156.109)
+          Tailnet: ${tailnet}
           Services: IMAPS 993 · SMTP 465 · HTTPS/JMAP 443 (loopback) · setup 8089 (loopback)
           EOF

@@ -72,7 +72,7 @@ Either way, the **canonical hostname** is the certificate's hostname. Clients co
 
 This is the decision most likely to waste an evening if reversed, which is why it is made here rather than during implementation.
 
-**Resolved in implementation:** locally, option 2 is in place — `bootstrap.sh` generates an internal CA and a server certificate with `subjectAltName = DNS:mail.mailflow.test, DNS:mailflow.test`, installs it through the `Certificate` object, and reloads it. Verification was done with certificate checking enabled against that CA, with SNI set to the canonical name. Option 1 remains the intended production path on the Radxa and is unverified here because no tailnet was reachable.
+**Resolved in implementation:** option 2 is in place — `bootstrap.sh` generates an internal CA and a server certificate with `subjectAltName = DNS:mail.mailflow.test, DNS:mailflow.test`, installs it through the `Certificate` object, and reloads it. Verification was done with certificate checking enabled against that CA, with SNI set to the canonical name. On the Radxa the tailnet is reachable, but `tailscale status --json` reports `"CertDomains": null`: HTTPS certificates are not enabled, so option 1 is not available. The internal CA is the chosen path for now; enabling tailnet HTTPS certificates remains the preferred future path.
 
 The bootstrap call sets `requestTlsCertificate: false`. Without it, the server attempts ACME for the `.test` domain and logs repeated `acme.auth.error: invalidContact` failures. A `.test` name can never obtain a public certificate, so asking is not a harmless default.
 
