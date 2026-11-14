@@ -45,6 +45,10 @@ published setup or management ports directly. `bootstrap.sh`, the HTTPS wait,
 and the certificate SAN check use `docker exec` into `mailflow-stalwart` and
 the container's internal listeners (`8080` and `443`).
 
+`MAIL_TAILNET_IP` is an optional `production` environment variable used only by
+the deploy run summary; the service never reads it. It is a variable rather
+than a secret because the summary prints it, and secrets would be masked.
+
 ## Prerequisites
 
 - Docker with the Compose plugin (`docker compose version` succeeds).
@@ -54,6 +58,15 @@ the container's internal listeners (`8080` and `443`).
   ASN/Geo data from GitHub. Internal mail delivery needs no internet connection
   and no external DNS. The spam classifier model is absent at first start and a
   training task is scheduled; filtering is not tuned or relied on here.
+
+### Host readiness (verified 2026-11-14)
+
+On the deployment host, `docker compose version` reports `2.26.1-4`,
+`tailscale status` reports the host as `rock-5t` on the tailnet, and the
+persistent data path `/home/radxa/repos/mailflow/deploy/mail/data` exists with
+`etc/`, `lib/` and `tls/` owned by `2000:2000`. The host's tailnet address is
+supplied by the `MAIL_TAILNET_IP` environment variable rather than tracked
+here.
 
 ## Files
 
@@ -188,9 +201,12 @@ sudo security add-trusted-cert -d -r trustRoot \
 Do not disable certificate verification in a client: the contract is verified
 TLS, and the internal CA exists so that verification can stay on.
 
-On the Radxa, the preferred certificate is the tailnet certificate obtained via
-`tailscale cert`, which no client has to trust by hand. That path was **not
-verified** here because no tailnet was available; see [Known gaps](#known-gaps).
+On the Radxa, the preferred certificate would be the tailnet certificate
+obtained via `tailscale cert`, which no client has to trust by hand. It is not
+available on the current tailnet: `tailscale status --json` reports
+`"CertDomains": null`, so HTTPS certificates are not enabled. The internal CA
+is therefore the chosen certificate path for now; see
+[Known gaps](#known-gaps).
 
 ## Accounts
 
@@ -345,11 +361,11 @@ new release migrated data.
 
 ## Known gaps
 
-- **Radxa host readiness** was not verified here: no access to the host, its
-  Docker installation, or its tailnet. The local arm64 container is native, but
-  the host checklist in the change's task 1.3 remains open.
-- **Tailnet certificate** (`tailscale cert`) was not exercised; the internal CA
-  is what was verified.
+- **Tailnet certificate** (`tailscale cert`) is unavailable because the tailnet
+  has HTTPS certificates disabled (`"CertDomains": null`). The internal CA
+  (`CN=Mailflow Internal CA`, SANs `mail.mailflow.test, mailflow.test`) is the
+  chosen path for now. Enabling HTTPS certificates for the tailnet remains the
+  preferred future path.
 - **Desktop and mobile clients** (Thunderbird or Apple Mail, and a phone over the
   tailnet) were not available. Verification used Python's stdlib IMAP/SMTP
   clients, which are real protocol clients but not two distinct client families.
