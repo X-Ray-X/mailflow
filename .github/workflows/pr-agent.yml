@@ -20,6 +20,10 @@ jobs:
     steps:
       - name: PR Agent action step
         id: pragent
+        # Advisory only. PR-Agent depends on a free-tier model key, so quota
+        # exhaustion, provider outages, or a recorded tool error must not fail
+        # the pull request check. The review is a convenience, not a gate.
+        continue-on-error: true
         # Pinned release rather than @main: the action runs with a write-scoped
         # GITHUB_TOKEN and the production secrets, so its code must be immutable.
         uses: The-PR-Agent/pr-agent@v0.50.0

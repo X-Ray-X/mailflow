@@ -16,7 +16,7 @@ repository without touching the pre-existing runner.
 |---|---|---|
 | `ci.yml` | pull request / manual | structural gate for `deploy/mail/compose.yaml` |
 | `deploy.yml` | push to `main` / manual | deploy on the host, then verify ports and tailnet TLS |
-| `pr-agent.yml` | pull request / comment | PR-Agent review / describe / improve |
+| `pr-agent.yml` | pull request / comment | PR-Agent review / describe / improve (advisory, never blocks) |
 
 ### Runner
 

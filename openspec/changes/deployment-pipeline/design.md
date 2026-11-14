@@ -93,3 +93,8 @@ The model is the free-tier Google AI Studio Gemini, configured as
 `gemini/gemini-3-flash-preview`; the provider prefix is required or LiteLLM
 routes the request to Vertex AI, which has no credentials here. The job
 declares `environment: production` so `GEMINI_API_KEY` is visible.
+
+The job is advisory: the step sets `continue-on-error`, so free-tier quota
+exhaustion, provider outages, or a recorded tool error cannot fail the pull
+request check. Reviews are a convenience, not a merge gate; CI remains the
+only required signal.
