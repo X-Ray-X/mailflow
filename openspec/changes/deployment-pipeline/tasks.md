@@ -8,7 +8,8 @@
   services, images, ports), never the live stack, so it tests the pull request
   rather than the host. Ports are compared in ascending order
   (`443,465,993,8080`).
-- [ ] 1.3 Confirm the gate passes on PR #1. The first run failed with
+- [x] 1.3 Confirm the gate passes on a pull request. Run `43555418517`
+  (PR #2, `a0b0f1d`) passed in 22s. The first attempt failed with
   `IndentationError`: the multi-line Python was indented inside the YAML block
   scalar. The script is now a single line and asserts the rendered ports.
 
@@ -41,9 +42,10 @@
 - [x] 3.2 Wire the GitHub Environment secret `GEMINI_API_KEY` (free-tier Google
   AI Studio key) into the workflow. The first run did not authenticate: the
   bare model id was routed to Vertex AI.
-- [ ] 3.3 Observe PR-Agent's review/describe/improve comments. Run
-  `43553398458` failed before posting them; re-verify on the next pull request
-  after the `gemini/` prefix fix.
+- [x] 3.3 Observe PR-Agent's review/describe/improve comments. Run
+  `43555418406` (PR #2, `a0b0f1d`) passed after declaring
+  `environment: production`; the PR shows a generated description, a Reviewer
+  Guide and Code Suggestions.
 
 ## 4. Record the change in OpenSpec
 
