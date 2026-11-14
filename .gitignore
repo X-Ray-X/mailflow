@@ -1,0 +1,7 @@
+# Local deployment state and secrets
+deploy/mail/.env
+deploy/mail/data/
+
+# Tooling noise
+.DS_Store
+*.log
