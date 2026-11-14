@@ -1,0 +1,58 @@
+name: CI — mail infrastructure
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mail-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Gate 1 — compose project renders cleanly and matches the declaration in the
+  # repository. Nothing here touches the stack.
+  compose-contract:
+    runs-on: [self-hosted, radxa]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: compose renders, pins the release, ports match the docs
+        run: |
+          cd deploy/mail
+          # .env.example is names and examples only — a safe source for the
+          # structural gates. Do not write a .env here: the runner may share a
+          # checkout with the operator's real one.
+          env_file=.env.example
+
+          # the project must render and contain only the mail service
+          services="$(docker compose --env-file "$env_file" config --services)"
+          test "$services" = "stalwart" \
+            || { echo "compose must contain only the stalwart service, found: $services"; exit 1; }
+
+          # the declared image must be the pinned release, not a moving tag
+          declared="$(grep -E '^[[:space:]]*STALWART_IMAGE=' "$env_file" | cut -d= -f2-)"
+          resolved="$(docker compose --env-file "$env_file" config --images)"
+          test "$resolved" = "$declared" \
+            || { echo "compose resolves image '$resolved', expected '$declared'"; exit 1; }
+
+          # declared ports must match the documented inventory (no port 25,
+          # admin/JMAP listeners on loopback only). Parsed from the rendered
+          # config, so this asserts the PR's declaration without touching a
+          # running stack. Keep the Python on one line: this whole block is an
+          # indented YAML scalar, and a multi-line -c script would inherit the
+          # indentation and fail with IndentationError.
+          expected="443,465,993,8080"  # ascending, as rendered below
+          actual="$(docker compose --env-file "$env_file" config --format json \
+            | python3 -c 'import json,sys; cfg=json.load(sys.stdin); print(",".join(str(port) for port in sorted({int(p["published"]) for service in cfg["services"].values() for p in service.get("ports", [])})))')"
+          test "$actual" = "$expected" \
+            || { echo "declared ports are '$actual', expected '$expected'"; exit 1; }
+
+      - name: compose config
+        run: docker compose -f deploy/mail/compose.yaml --env-file deploy/mail/.env.example config

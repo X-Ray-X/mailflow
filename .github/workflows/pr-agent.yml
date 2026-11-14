@@ -10,6 +10,9 @@ jobs:
   pr_agent_job:
     if: github.event.sender.type != 'Bot'
     runs-on: ubuntu-latest
+    # The free-tier GEMINI_API_KEY lives in the production Environment. The
+    # environment has no protection rules, so no approval gate is added.
+    environment: production
     permissions:
       contents: read
       issues: write
@@ -17,15 +20,24 @@ jobs:
     steps:
       - name: PR Agent action step
         id: pragent
-        uses: The-PR-Agent/pr-agent@main
+        # Pinned release rather than @main: the action runs with a write-scoped
+        # GITHUB_TOKEN and the production secrets, so its code must be immutable.
+        uses: The-PR-Agent/pr-agent@v0.50.0
         env:
-          # Google AI Studio free tier: GEMINI_API_KEY already lives in the
-          # "production" GitHub Environment (see README). No paid subscription.
+          # Free-tier Google AI Studio Gemini key (no paid subscription).
+          # The GitHub Environment secret GEMINI_API_KEY is injected via this
+          # env var name (dot in name is valid for GitHub Actions env keys).
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Free-tier Gemini (small). Swap the id if your PR-Agent version rejects
-          # it; the workflow log will say so.
-          config.model: "gemini-3-flash-preview"
+          # PR-Agent documented config keys, mirrored as environment variables.
+          # The dot-keys are valid as Linux runner env var names and map onto
+          # the model / behaviour settings.
+          #
+          # The provider prefix is required: LiteLLM treats a bare
+          # "gemini-3-flash-preview" as Vertex AI and then fails with
+          # DefaultCredentialsError. "gemini/" routes it to Google AI Studio,
+          # which is what GOOGLE_AI_STUDIO.GEMINI_API_KEY authenticates.
+          config.model: "gemini/gemini-3-flash-preview"
           config.fallback_models: '[]'
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"

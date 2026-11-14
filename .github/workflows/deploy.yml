@@ -1,0 +1,96 @@
+name: Deploy mail infrastructure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mail-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MAIL_COMPOSE_DIR: deploy/mail
+
+jobs:
+  deploy:
+    # Deploy the mail infrastructure (Stalwart + bootstrap) to the homelab host.
+    # The self-hosted runner is registered on the host and drives the host's
+    # docker socket, so `docker compose up -d` lands on the Radxa host.
+    runs-on: [self-hosted, radxa]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: checkout mailflow
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: prepare deploy environment from GitHub Environment secrets
+        run: |
+          set -euo pipefail
+          cd ${{ env.MAIL_COMPOSE_DIR }}
+          # .env.example is names and examples only. The real values live in the
+          # "production" GitHub Environment secrets. Inject only the credential
+          # fields; everything else keeps its tracked default.
+          cp .env.example .env
+          sed -i "s|^MAIL_BOOTSTRAP_PASSWORD=.*|MAIL_BOOTSTRAP_PASSWORD=${{ secrets.MAIL_BOOTSTRAP_PASSWORD }}|" .env
+          sed -i "s|^MAIL_ACCOUNT_ALICE_PASSWORD=.*|MAIL_ACCOUNT_ALICE_PASSWORD=${{ secrets.MAIL_ACCOUNT_ALICE_PASSWORD }}|" .env
+          sed -i "s|^MAIL_ACCOUNT_BOB_PASSWORD=.*|MAIL_ACCOUNT_BOB_PASSWORD=${{ secrets.MAIL_ACCOUNT_BOB_PASSWORD }}|" .env
+          chmod 600 .env
+
+      - name: bootstrap the mail server (first start only)
+        run: |
+          cd ${{ env.MAIL_COMPOSE_DIR }}
+          ./scripts/bootstrap.sh
+
+      - name: start the mail service
+        run: |
+          cd ${{ env.MAIL_COMPOSE_DIR }}
+          docker compose -f compose.yaml up -d --remove-orphans
+
+      - name: wait for the HTTPS listener
+        run: |
+          cd ${{ env.MAIL_COMPOSE_DIR }}
+          for i in $(seq 1 30); do
+            if curl -sk https://127.0.0.1:${MAIL_HTTPS_PORT:-443}/healthz/live >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "HTTPS listener did not become healthy" >&2
+          exit 1
+
+      - name: verify published ports and tailnet certificate
+        run: |
+          cd ${{ env.MAIL_COMPOSE_DIR }}
+          # published ports must match the documented inventory (no port 25;
+          # admin/JMAP listeners stay on loopback only). Read from the rendered
+          # config so the check is stable across compose versions; the `up -d`
+          # above already made the running stack match it. Keep the Python on
+          # one line: the heredoc-free block is an indented YAML scalar, and a
+          # multi-line -c script would inherit the indentation.
+          expected="443,465,993,8080"  # ascending, as rendered below
+          actual="$(docker compose -f compose.yaml config --format json \
+            | python3 -c 'import json,sys; cfg=json.load(sys.stdin); print(",".join(str(port) for port in sorted({int(p["published"]) for service in cfg["services"].values() for p in service.get("ports", [])})))')"
+          test "$actual" = "$expected" \
+            || { echo "published ports are '$actual', expected '$expected'"; exit 1; }
+
+          # certificate must cover the canonical tailnet hostname. This step
+          # asserts the SAN only (the internal CA trust store lives on the
+          # clients; full validation is scripts/verify.sh).
+          openssl s_client -connect mail.mailflow.test:993 -servername mail.mailflow.test \
+            </dev/null | openssl x509 -noout -ext subjectAltName \
+            | grep -q "DNS:mail.mailflow.test" \
+            || { echo "certificate does not cover mail.mailflow.test"; exit 1; }
+
+      - name: write run summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          Mailflow deployed from ${{ github.sha }}
+          Tailnet: mail.mailflow.test (radxa tailnet IP 100.98.156.109)
+          Services: IMAPS 993 · SMTP 465 · HTTPS/JMAP 443 (loopback) · setup 8080 (loopback)
+          EOF
