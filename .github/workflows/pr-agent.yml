@@ -28,7 +28,7 @@ jobs:
           # The dot-keys are valid as Linux runner env var names and map onto
           # the model / behaviour settings.
           config.model: "gemini-3-flash-preview"
-          config.fallback_models: '["gemini-2.5-flash-lite"]'
+          config.fallback_models: '[]'
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"
