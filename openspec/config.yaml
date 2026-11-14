@@ -1,0 +1,54 @@
+schema: spec-driven
+
+# Project context applied when generating or evaluating OpenSpec artifacts.
+# Only constraints an agent cannot infer by reading the repository belong here.
+context: |
+  Mailflow is a homelab email platform and a demonstration of spec-driven development
+  with OpenCode and OpenSpec. It is also an interview portfolio project, so a small,
+  correct, explainable system is preferred over a large one.
+
+  Architectural constraints:
+  - Stalwart owns IMAP, SMTP submission, JMAP, mailbox storage, and account authentication.
+    It is the only source of truth for mailbox state.
+  - The Go service is the only published HTTP contract for other components and the future
+    React client. It must not leak vendor object types, identifiers, error codes, or IMAP
+    vocabulary into its public API.
+  - PostgreSQL, when introduced, owns Mailflow application state only (idempotency records,
+    outbox, projections) and never mailbox contents.
+  - Mail infrastructure and the application deploy as separate Docker Compose projects.
+    An application deploy must never recreate, upgrade, or reset mail containers or volumes.
+  - The target host is arm64. Images must run natively, not under emulation.
+  - Mail is internal only: one reserved non-routable domain, no public delivery, no open relay.
+  - Stalwart configuration options must come from the documentation of the pinned release.
+    Never carry configuration over from memory or from a different release.
+
+  Scope: internal mail exchange between local accounts, standard client access, the Go
+  service layer, and a later React client. Public internet mail, MX/SPF/DKIM/DMARC,
+  deliverability, spam tuning, Kubernetes, and a second specification framework are out
+  of scope unless a change states otherwise.
+
+rules:
+  proposal:
+    - Always state what is out of scope.
+    - Do not describe implementation details; those belong in design.
+  specs:
+    - Requirements describe observable behavior or external constraints only.
+    - Prefer a scenario that can be executed over prose that can only be interpreted.
+  design:
+    - Record alternatives considered for every consequential decision.
+    - Name the risk and its mitigation for anything that could lose data or break client access.
+  tasks:
+    - Every task states how its completion is verified.
+    - Keep tasks completable in one session.
+    - Do not collect tests or documentation into a final group.
+
+operations:
+  apply:
+    guidance:
+      - Verify claims against the pinned release documentation before configuring anything.
+      - Report anything that could not be verified, and why, instead of implying it passed.
+      - Do not widen scope beyond the active change; propose a new change instead.
+  archive:
+    guidance:
+      - Archive only after the acceptance scenarios have been observed to pass.
+      - Summarise what was verified manually versus what is covered by automated checks.

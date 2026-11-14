@@ -1,0 +1,35 @@
+name: mailflow-mail
+
+# Mail infrastructure: the source of truth for mailboxes.
+# Deliberately a separate Compose project from the Mailflow application so that
+# an application deploy can never recreate, upgrade, or reset this service or
+# its data. See openspec/changes/stalwart-local-environment/design.md.
+
+services:
+  stalwart:
+    image: ${STALWART_IMAGE:?STALWART_IMAGE must be set}
+    container_name: mailflow-stalwart
+    init: true
+    restart: unless-stopped
+
+    ports:
+      # Client access. No port 25: this deployment never accepts internet mail.
+      - "${MAIL_IMAPS_PORT:-993}:993"
+      - "${MAIL_SUBMISSION_PORT:-465}:465"
+      # Administration and (later) JMAP for the Go service. Host loopback only.
+      - "127.0.0.1:${MAIL_HTTPS_PORT:-443}:443"
+      - "127.0.0.1:${MAIL_SETUP_PORT:-8080}:8080"
+
+    volumes:
+      # config.json lives here. Losing this file makes the server restart in
+      # setup mode even though the data store is intact.
+      - ${MAIL_DATA_DIR:-./data}/etc:/etc/stalwart
+      - ${MAIL_DATA_DIR:-./data}/lib:/var/lib/stalwart
+      # Read-only TLS material maintained outside the container.
+      - ${MAIL_DATA_DIR:-./data}/tls:/etc/stalwart/tls:ro
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
