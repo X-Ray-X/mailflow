@@ -74,8 +74,10 @@ jobs:
       - name: wait for the HTTPS listener
         run: |
           cd ${{ env.MAIL_COMPOSE_DIR }}
+          # The runner is a container, so its 127.0.0.1 is not the host's.
+          # Exec into the service and use its internal listener instead.
           for i in $(seq 1 30); do
-            if curl -sk https://127.0.0.1:${MAIL_HTTPS_PORT:-443}/healthz/live >/dev/null 2>&1; then
+            if docker exec mailflow-stalwart curl -sk https://127.0.0.1:443/healthz/live >/dev/null 2>&1; then
               exit 0
             fi
             sleep 2
@@ -98,11 +100,13 @@ jobs:
           test "$actual" = "$expected" \
             || { echo "published ports are '$actual', expected '$expected'"; exit 1; }
 
-          # certificate must cover the canonical tailnet hostname. Connect to
-          # loopback with SNI so the check does not depend on host DNS; the SAN
-          # is what matters. The internal CA trust store lives on the clients;
-          # full validation is scripts/verify.sh.
-          openssl s_client -connect 127.0.0.1:993 -servername mail.mailflow.test \
+          # certificate must cover the canonical tailnet hostname. Read it from
+          # inside the service (the runner's loopback is not the host's) with
+          # SNI, so the check does not depend on host DNS; the SAN is what
+          # matters. The internal CA trust store lives on the clients; full
+          # validation is scripts/verify.sh.
+          docker exec mailflow-stalwart openssl s_client \
+            -connect 127.0.0.1:993 -servername mail.mailflow.test \
             </dev/null | openssl x509 -noout -ext subjectAltName \
             | grep -q "DNS:mail.mailflow.test" \
             || { echo "certificate does not cover mail.mailflow.test"; exit 1; }
