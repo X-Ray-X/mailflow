@@ -1,0 +1,60 @@
+name: CI — mail infrastructure
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mail-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Gate 1 — compose project renders cleanly and matches the declaration in the
+  # repository. Nothing here touches the stack.
+  compose-contract:
+    runs-on: [self-hosted, radxa]
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: compose renders, pins the release, ports match the docs
+        run: |
+          cd deploy/mail
+          # .env.example is names and examples only — a safe source for the
+          # structural gates.
+          cp .env.example .env
+
+          # the project must render and contain only the mail service
+          services="$(docker compose config --services)"
+          test "$services" = "stalwart" \
+            || { echo "compose must contain only the stalwart service, found: $services"; exit 1; }
+
+          # the running image must be the pinned release, not a moving tag
+          declared="$(grep -E '^[[:space:]]*STALWART_IMAGE=' .env.example | cut -d= -f2-)"
+          resolved="$(docker compose config --images)"
+          test "$resolved" = "$declared" \
+            || { echo "compose resolves image '$resolved', expected '$declared'"; exit 1; }
+
+          # published ports must match the documented inventory (no port 25,
+          # admin/JMAP listeners on loopback only)
+          expected="993,465,443,8080"
+          actual="$(docker compose ps --format json | python3 -c '
+            import json,sys
+            pub=set()
+            for line in sys.stdin:
+              s=json.loads(line)
+              for p in (s.get("Publishers") or []):
+                if p.get("PublishedPort"): pub.add(int(p["PublishedPort"]))
+            sys.stdout.write(",".join(map(str,sorted(pub))))
+          ')"
+          test "$actual" = "$expected" \
+            || { echo "published ports are '$actual', expected '$expected'"; exit 1; }
+
+      - name: compose config
+        run: docker compose -f deploy/mail/compose.yaml config
