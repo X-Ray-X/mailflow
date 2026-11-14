@@ -98,3 +98,8 @@ The job is advisory: the step sets `continue-on-error`, so free-tier quota
 exhaustion, provider outages, or a recorded tool error cannot fail the pull
 request check. Reviews are a convenience, not a merge gate; CI remains the
 only required signal.
+
+A rejected request is not retried: `config.num_retries=0` stops the default
+four same-model retries (up to 30s each) that otherwise turn a daily-quota 429
+into minutes of spinning, and `github_action_config.fail_on_command_errors=false`
+keeps the recorded error from failing the action.
