@@ -5,10 +5,7 @@ Mailflow service architecture challenge designed to showcase Spec-Driven Develop
 ## Continuous delivery
 
 The mail infrastructure is deployed from this repository on the homelab host.
-The GitHub Actions runner on the host (`/path/to/actions-runner`)
-runs the pipelines below; a second runner service
-(`github-runner-mailflow`, `RUNNER_REPO: X-Ray-X/mailflow`) serves this
-repository without touching the pre-existing runner.
+A self-hosted GitHub Actions runner on the host runs the pipelines below.
 
 ### Workflows
 
