@@ -30,6 +30,13 @@
   `MAIL_DATA_DIR=/home/radxa/repos/mailflow/deploy/mail/data`. Confirmed from a
   read-only probe: without it, the host daemon resolves bind mounts outside the
   checkout and the mail data is not persistent.
+- [ ] 2.5 Reach the service from inside the container. The runner's loopback is
+  not the host's, so the published setup and management ports are unreachable
+  from the workflow. `bootstrap.sh`, the HTTPS wait, and the SAN check use
+  `docker exec mailflow-stalwart` against the internal listeners (`8080`,
+  `443`). Verified on the host that the image provides `curl` and `openssl`
+  and that the setup listener answers `200` over `docker exec`; the full
+  deploy is still unverified.
 
 ## 3. Add PR-Agent to the PR flow
 

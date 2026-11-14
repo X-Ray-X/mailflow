@@ -4,7 +4,8 @@
 # Idempotent: re-running on a bootstrapped server only re-applies the
 # certificate, relaying, and account settings. It never deletes data.
 #
-# Requires: docker with the compose plugin, curl, openssl, python3.
+# Requires: docker with the compose plugin, openssl, python3. HTTP calls run
+# inside the mail container, which provides curl.
 #
 # Two phases, because Stalwart only exists in one of them at a time:
 #   1. bootstrap mode - no config.json yet, plain HTTP on the setup port, and
@@ -33,13 +34,18 @@ set +a
 : "${MAIL_ACCOUNT_BOB:?MAIL_ACCOUNT_BOB must be set}"
 : "${MAIL_ACCOUNT_BOB_PASSWORD:?MAIL_ACCOUNT_BOB_PASSWORD must be set}"
 
-for cmd in docker curl openssl python3; do
+for cmd in docker openssl python3; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
 done
 
 DATA_DIR="${MAIL_DATA_DIR:-./data}"
-SETUP_PORT="${MAIL_SETUP_PORT:-8089}"
-HTTPS_PORT="${MAIL_HTTPS_PORT:-443}"
+CTR="mailflow-stalwart"
+
+# The container's own listeners. The script reaches them with `docker exec`
+# rather than through the published host ports: a containerized runner has its
+# own loopback, so 127.0.0.1 there is not the host's.
+SETUP_PORT=8080
+HTTPS_PORT=443
 
 DC="docker compose -f compose.yaml"
 DCB="docker compose -f compose.yaml -f compose.bootstrap.yaml"
@@ -96,10 +102,16 @@ EOF
 
 # --- helpers ---------------------------------------------------------------
 
+# Run curl inside the mail service. Its setup and management listeners are on
+# the container's loopback; the published host ports are for external clients.
+curl_ctr() {
+  docker exec "$CTR" curl "$@"
+}
+
 wait_for() { # url, seconds
   i=0
   while [ "$i" -lt "$2" ]; do
-    if curl -sk -o /dev/null "$1"; then return 0; fi
+    if curl_ctr -sk -o /dev/null "$1"; then return 0; fi
     i=$((i + 1))
     sleep 2
   done
@@ -120,7 +132,7 @@ jmap_using() {
 call() { # api-url, credentials, method-call-json
   body=$(jmap_using "$3")
   json_check "$body"
-  curl -sS -k -u "$2" -H 'Content-Type: application/json' \
+  curl_ctr -sS -k -u "$2" -H 'Content-Type: application/json' \
     --data-binary "$body" "$1"
 }
 
@@ -137,7 +149,7 @@ if [ ! -f "$DATA_DIR/etc/config.json" ]; then
   own_data
   $DCB up -d
   wait_for "http://127.0.0.1:${SETUP_PORT}/jmap/session" 60 \
-    || die "setup listener did not answer on port ${SETUP_PORT}"
+    || die "setup listener did not answer inside ${CTR}"
 
   RESP=$(call "$SETUP_API" "admin:${MAIL_BOOTSTRAP_PASSWORD}" \
     "[\"x:Bootstrap/set\",{\"update\":{\"singleton\":{
