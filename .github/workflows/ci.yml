@@ -48,7 +48,7 @@ jobs:
           # running stack. Keep the Python on one line: this whole block is an
           # indented YAML scalar, and a multi-line -c script would inherit the
           # indentation and fail with IndentationError.
-          expected="443,465,993,8080"  # ascending, as rendered below
+          expected="443,465,993,8089"  # ascending, as rendered below
           actual="$(docker compose --env-file "$env_file" config --format json \
             | python3 -c 'import json,sys; cfg=json.load(sys.stdin); print(",".join(str(port) for port in sorted({int(p["published"]) for service in cfg["services"].values() for p in service.get("ports", [])})))')"
           test "$actual" = "$expected" \

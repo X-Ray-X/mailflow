@@ -76,7 +76,7 @@ if 25 in published:
 if published != expected:
     sys.exit(f"published ports {sorted(published)} != documented {sorted(expected)}")
 print("ok   published ports are " + ", ".join(str(p) for p in sorted(published)))
-' "${MAIL_IMAPS_PORT:-993}" "${MAIL_SUBMISSION_PORT:-465}" "${HTTPS_PORT}" "${MAIL_SETUP_PORT:-8080}"
+' "${MAIL_IMAPS_PORT:-993}" "${MAIL_SUBMISSION_PORT:-465}" "${HTTPS_PORT}" "${MAIL_SETUP_PORT:-8089}"
 
 wait_healthy 30
 say ""

@@ -20,6 +20,10 @@ jobs:
     steps:
       - name: PR Agent action step
         id: pragent
+        # Advisory only. PR-Agent depends on a free-tier model key, so quota
+        # exhaustion, provider outages, or a recorded tool error must not fail
+        # the pull request check. The review is a convenience, not a gate.
+        continue-on-error: true
         # Pinned release rather than @main: the action runs with a write-scoped
         # GITHUB_TOKEN and the production secrets, so its code must be immutable.
         uses: The-PR-Agent/pr-agent@v0.50.0
@@ -39,6 +43,14 @@ jobs:
           # which is what GOOGLE_AI_STUDIO.GEMINI_API_KEY authenticates.
           config.model: "gemini/gemini-3-flash-preview"
           config.fallback_models: '[]'
+          # Do not retry a request the provider rejects. The free tier's daily
+          # quota answers 429 with a multi-hour Retry-After; the default of 4
+          # same-model retries (up to 30s each) just spins. Fail at once and
+          # let the advisory check go green.
+          config.num_retries: "0"
+          # A recorded command error (for example the 429 above) must not fail
+          # the action; the review is a convenience, not a gate.
+          github_action_config.fail_on_command_errors: "false"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"

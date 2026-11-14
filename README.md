@@ -5,10 +5,10 @@ Mailflow service architecture challenge designed to showcase Spec-Driven Develop
 ## Continuous delivery
 
 The mail infrastructure is deployed from this repository on the homelab host.
-The GitHub Actions runner on the host (`/opt/data/repos/scripts/actions-runner`)
+The GitHub Actions runner on the host (`/home/radxa/repos/scripts/actions-runner`)
 runs the pipelines below; a second runner service
 (`github-runner-mailflow`, `RUNNER_REPO: X-Ray-X/mailflow`) serves this
-repository without touching the `rayofsunshine-site` runner.
+repository without touching the pre-existing runner.
 
 ### Workflows
 
@@ -16,11 +16,10 @@ repository without touching the `rayofsunshine-site` runner.
 |---|---|---|
 | `ci.yml` | pull request / manual | structural gate for `deploy/mail/compose.yaml` |
 | `deploy.yml` | push to `main` / manual | deploy on the host, then verify ports and tailnet TLS |
-| `pr-agent.yml` | pull request / comment | PR-Agent review / describe / improve |
+| `pr-agent.yml` | pull request / comment | PR-Agent review / describe / improve (advisory, never blocks) |
 
 ### Runner
 
-- `github-runner` — registered for `X-Ray-X/rayofsunshine-site`.
 - `github-runner-mailflow` — registered for `X-Ray-X/mailflow`, its own data
   directory `runner-data-mailflow`.
 

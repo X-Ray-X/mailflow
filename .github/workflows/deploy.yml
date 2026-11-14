@@ -14,6 +14,10 @@ concurrency:
 
 env:
   MAIL_COMPOSE_DIR: deploy/mail
+  # Absolute path on the host. The runner is a container, so this directory
+  # must be mounted into the runner at the same path; otherwise Docker on the
+  # host resolves it somewhere else and the mail data is not persistent.
+  MAIL_DATA_DIR: ${{ vars.MAIL_DATA_DIR || '/home/radxa/repos/mailflow/deploy/mail/data' }}
 
 jobs:
   deploy:
@@ -40,12 +44,27 @@ jobs:
           sed -i "s|^MAIL_BOOTSTRAP_PASSWORD=.*|MAIL_BOOTSTRAP_PASSWORD=${{ secrets.MAIL_BOOTSTRAP_PASSWORD }}|" .env
           sed -i "s|^MAIL_ACCOUNT_ALICE_PASSWORD=.*|MAIL_ACCOUNT_ALICE_PASSWORD=${{ secrets.MAIL_ACCOUNT_ALICE_PASSWORD }}|" .env
           sed -i "s|^MAIL_ACCOUNT_BOB_PASSWORD=.*|MAIL_ACCOUNT_BOB_PASSWORD=${{ secrets.MAIL_ACCOUNT_BOB_PASSWORD }}|" .env
+          # The mail data lives outside the checkout, on a host directory that
+          # is mounted into the runner at the same absolute path.
+          grep -qs ' /home/radxa/repos/mailflow ' /proc/self/mountinfo \
+            || { echo "error: /home/radxa/repos/mailflow is not mounted into the runner"; exit 1; }
+          sed -i "s|^MAIL_DATA_DIR=.*|MAIL_DATA_DIR=${MAIL_DATA_DIR}|" .env
           chmod 600 .env
+
+      - name: ensure the persistent data directory exists
+        run: |
+          set -euo pipefail
+          # The runner is not root. Passwordless sudo prepares the directory
+          # for the container's uid 2000; bootstrap re-applies ownership.
+          sudo mkdir -p "$MAIL_DATA_DIR"
+          sudo chown 2000:2000 "$MAIL_DATA_DIR"
 
       - name: bootstrap the mail server (first start only)
         run: |
           cd ${{ env.MAIL_COMPOSE_DIR }}
-          ./scripts/bootstrap.sh
+          # Root is needed to prepare uid-2000-owned bind mounts on the host
+          # directory. The script chowns etc/lib/tls itself when running as root.
+          sudo ./scripts/bootstrap.sh
 
       - name: start the mail service
         run: |
@@ -73,16 +92,17 @@ jobs:
           # above already made the running stack match it. Keep the Python on
           # one line: the heredoc-free block is an indented YAML scalar, and a
           # multi-line -c script would inherit the indentation.
-          expected="443,465,993,8080"  # ascending, as rendered below
+          expected="443,465,993,8089"  # ascending, as rendered below
           actual="$(docker compose -f compose.yaml config --format json \
             | python3 -c 'import json,sys; cfg=json.load(sys.stdin); print(",".join(str(port) for port in sorted({int(p["published"]) for service in cfg["services"].values() for p in service.get("ports", [])})))')"
           test "$actual" = "$expected" \
             || { echo "published ports are '$actual', expected '$expected'"; exit 1; }
 
-          # certificate must cover the canonical tailnet hostname. This step
-          # asserts the SAN only (the internal CA trust store lives on the
-          # clients; full validation is scripts/verify.sh).
-          openssl s_client -connect mail.mailflow.test:993 -servername mail.mailflow.test \
+          # certificate must cover the canonical tailnet hostname. Connect to
+          # loopback with SNI so the check does not depend on host DNS; the SAN
+          # is what matters. The internal CA trust store lives on the clients;
+          # full validation is scripts/verify.sh.
+          openssl s_client -connect 127.0.0.1:993 -servername mail.mailflow.test \
             </dev/null | openssl x509 -noout -ext subjectAltName \
             | grep -q "DNS:mail.mailflow.test" \
             || { echo "certificate does not cover mail.mailflow.test"; exit 1; }
@@ -92,5 +112,5 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           Mailflow deployed from ${{ github.sha }}
           Tailnet: mail.mailflow.test (radxa tailnet IP 100.98.156.109)
-          Services: IMAPS 993 · SMTP 465 · HTTPS/JMAP 443 (loopback) · setup 8080 (loopback)
+          Services: IMAPS 993 · SMTP 465 · HTTPS/JMAP 443 (loopback) · setup 8089 (loopback)
           EOF

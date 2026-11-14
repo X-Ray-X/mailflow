@@ -17,17 +17,33 @@ against Stalwart `v1.1.0`, unless it appears under [Known gaps](#known-gaps).
 | Image digest | index `sha256:f772aa6e…20837e`, linux/arm64 manifest `sha256:eebae3f4…c5211d` |
 | Domain | `mailflow.test` (reserved, non-routable) |
 | Hostname | `mail.mailflow.test` |
-| Data | host bind mounts under `deploy/mail/data/` |
+| Data | host bind mounts under `deploy/mail/data/` (on the runner host: `/home/radxa/repos/mailflow/deploy/mail/data`) |
 | Container user | `2000:2000` (`stalwart`) |
 
 The image publishes a native `linux/arm64` manifest, so it runs without
 emulation on the target Radxa Rock 5T. Verified with
 `docker buildx imagetools inspect ghcr.io/stalwartlabs/stalwart:v1.1.0`.
 
+### Host deployment (CI)
+
+The deployment workflow runs on the self-hosted runner, which is itself a
+container. The host clone `/home/radxa/repos/mailflow` must be mounted into the
+runner at the **same absolute path**. Compose bind mounts are resolved by the
+host Docker daemon, so a path that only exists inside the runner (for example
+the checkout under `/runner/_work`) would silently mount a different directory
+on the host. The workflow refuses to deploy unless
+`/home/radxa/repos/mailflow` appears in `/proc/self/mountinfo`.
+
+`MAIL_DATA_DIR` is therefore set to
+`/home/radxa/repos/mailflow/deploy/mail/data` in CI. The workflow runs
+`bootstrap.sh` with `sudo`, which creates the directory and hands
+`etc/`, `lib/` and `tls/` to uid/gid `2000` so the container can read and write
+them. Operations that read the TLS key or the data tree must use `sudo`.
+
 ## Prerequisites
 
 - Docker with the Compose plugin (`docker compose version` succeeds).
-- Free host ports `993`, `465`, and loopback `443` / `8080`.
+- Free host ports `993`, `465`, and loopback `443` / `8089`.
 - `curl`, `openssl`, and `python3` for `scripts/bootstrap.sh` and `scripts/verify.sh`.
 - Outbound HTTPS on the **first** start only: the image downloads the WebUI and
   ASN/Geo data from GitHub. Internal mail delivery needs no internet connection
@@ -88,7 +104,7 @@ reports the accounts as already present.
 1. Generates an internal CA and a server certificate for `MAIL_HOSTNAME` if
    `data/tls` has none.
 2. Starts the bootstrap overlay. Stalwart has no `config.json` yet, so it serves
-   only the setup listener on `127.0.0.1:8080`.
+   only the setup listener on `127.0.0.1:8089`.
 3. Calls `x:Bootstrap/set` with the hostname, the domain, **no ACME request**
    (`requestTlsCertificate: false`), no DKIM generation, a manual DNS server,
    and stdout logging. The reply carries the administrator username and one-time
@@ -139,7 +155,7 @@ Published, from `docker compose ps`:
 | `993` | `993` | IMAPS, client access |
 | `465` | `465` | SMTP submission, implicit TLS |
 | `127.0.0.1:443` | `443` | JMAP and management API over HTTPS, loopback only |
-| `127.0.0.1:8080` | `8080` | Plain HTTP (setup wizard, live health), loopback only |
+| `127.0.0.1:8089` | `8080` | Plain HTTP (setup wizard, live health), loopback only |
 
 The container also listens on `25` (SMTP), `995` (POP3S), and `4190` (ManageSieve),
 but those ports are **not published**. Port 25 is absent deliberately: nothing
@@ -275,12 +291,13 @@ protocols but not a desktop or mobile application.
 ## Backup and restore
 
 Both are filesystem operations on `deploy/mail/data`. Stop the service first so
-RocksDB is not writing during the copy.
+RocksDB is not writing during the copy. The CI deployment owns `etc/`, `lib/`
+and `tls/` as uid/gid `2000`, so read them with `sudo`.
 
 ```sh
 cd deploy/mail
 docker compose -f compose.yaml stop
-tar -czf mailflow-mail-$(date +%Y%m%d-%H%M).tgz -C data .
+sudo tar -czf mailflow-mail-$(date +%Y%m%d-%H%M).tgz -C data .
 docker compose -f compose.yaml start
 ```
 
@@ -289,9 +306,9 @@ Restore:
 ```sh
 cd deploy/mail
 docker compose -f compose.yaml stop
-rm -rf data
-mkdir data
-tar -xzf mailflow-mail-YYYYMMDD-HHMM.tgz -C data
+sudo rm -rf data
+sudo mkdir data
+sudo tar -xzf mailflow-mail-YYYYMMDD-HHMM.tgz -C data
 # Recreate, do not just start: an existing container keeps its old mount.
 docker compose -f compose.yaml up -d --force-recreate
 ```
