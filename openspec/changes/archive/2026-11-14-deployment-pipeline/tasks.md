@@ -21,22 +21,24 @@
 - [x] 2.2 Create the GitHub Environment `production` with secrets
   `MAIL_BOOTSTRAP_PASSWORD`, `MAIL_ACCOUNT_ALICE_PASSWORD`,
   `MAIL_ACCOUNT_BOB_PASSWORD` (all required for a deployment).
-- [ ] 2.3 Observe the deployment run on the self-hosted runner. PR #1 was
+- [x] 2.3 Observe the deployment run on the self-hosted runner. PR #1 was
   merged into `stalwart-local-environment`, not `main`, so `deploy.yml`
-  (push to `main`) has never run. Verify after the first `main` deployment:
-  the job deploys the stack and the summary shows the verdict.
-- [ ] 2.4 Mount `/home/radxa/repos/mailflow` into the runner container at the
+  (push to `main`) has never run. Run `43561620282` (`main`, `11516f9`) passed
+  end to end: bootstrap created the administrator, installed the certificate,
+  and the HTTPS wait and SAN check passed.
+- [x] 2.4 Mount `/home/radxa/repos/mailflow` into the runner container at the
   same absolute path and use
   `MAIL_DATA_DIR=/home/radxa/repos/mailflow/deploy/mail/data`. Confirmed from a
   read-only probe: without it, the host daemon resolves bind mounts outside the
-  checkout and the mail data is not persistent.
-- [ ] 2.5 Reach the service from inside the container. The runner's loopback is
+  checkout and the mail data is not persistent. The deployed container now
+  mounts `/home/radxa/repos/mailflow/deploy/mail/data/{etc,lib,tls}`, owned by
+  uid/gid `2000`.
+- [x] 2.5 Reach the service from inside the container. The runner's loopback is
   not the host's, so the published setup and management ports are unreachable
   from the workflow. `bootstrap.sh`, the HTTPS wait, and the SAN check use
   `docker exec mailflow-stalwart` against the internal listeners (`8080`,
-  `443`). Verified on the host that the image provides `curl` and `openssl`
-  and that the setup listener answers `200` over `docker exec`; the full
-  deploy is still unverified.
+  `443`). Run `43561620282` passed with this path; the internal setup and
+  HTTPS listeners answer `200`.
 
 ## 3. Add PR-Agent to the PR flow
 
@@ -62,5 +64,7 @@
 ## 4. Record the change in OpenSpec
 
 - [x] 4.1 Complete this change: proposal, design, tasks, specification.
-- [ ] 4.2 When the change's acceptance scenarios are observed to pass, archive
+- [x] 4.2 When the change's acceptance scenarios are observed to pass, archive
   it (moving it from `openspec/changes/` to `openspec/changes/archive/`).
+  Deployment run `43561620282` passed; archiving with the deployment-pipeline
+  spec synced to the main specs.
