@@ -40,6 +40,11 @@ on the host. The workflow refuses to deploy unless
 `etc/`, `lib/` and `tls/` to uid/gid `2000` so the container can read and write
 them. Operations that read the TLS key or the data tree must use `sudo`.
 
+The runner's loopback is not the host's, so the workflow does not call the
+published setup or management ports directly. `bootstrap.sh`, the HTTPS wait,
+and the certificate SAN check use `docker exec` into `mailflow-stalwart` and
+the container's internal listeners (`8080` and `443`).
+
 ## Prerequisites
 
 - Docker with the Compose plugin (`docker compose version` succeeds).
@@ -104,7 +109,9 @@ reports the accounts as already present.
 1. Generates an internal CA and a server certificate for `MAIL_HOSTNAME` if
    `data/tls` has none.
 2. Starts the bootstrap overlay. Stalwart has no `config.json` yet, so it serves
-   only the setup listener on `127.0.0.1:8089`.
+   only the setup listener (container port `8080`, published on
+   `127.0.0.1:8089`). The script reaches it with `docker exec`, so it also
+   works from the containerized CI runner, whose loopback is not the host's.
 3. Calls `x:Bootstrap/set` with the hostname, the domain, **no ACME request**
    (`requestTlsCertificate: false`), no DKIM generation, a manual DNS server,
    and stdout logging. The reply carries the administrator username and one-time

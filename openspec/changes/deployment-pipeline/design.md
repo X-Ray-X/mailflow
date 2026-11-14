@@ -61,6 +61,17 @@ is already in use on the deployment host. Only the loopback setup/health
 listener moves; the container listener and the public inventory are otherwise
 unchanged.
 
+### The bootstrap script talks to the service's internal listeners
+
+The deploy runs on a containerized runner, so its `127.0.0.1` is not the
+host's. The published setup and management ports are therefore unreachable
+from the workflow. `bootstrap.sh` uses `docker exec mailflow-stalwart curl`
+against the container's internal listeners (`8080` setup, `443` management),
+and the deploy's HTTPS wait and certificate SAN check do the same. This works
+identically on a host and inside the runner and does not depend on the
+published port mapping; `scripts/verify.sh` and the port gate still assert the
+published inventory.
+
 ### Workflow files live in the mailflow repository
 
 `.github/workflows/ci.yml`, `deploy.yml` and `pr-agent.yml` are committed to
