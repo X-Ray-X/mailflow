@@ -34,16 +34,32 @@ automated.
 ### The pipeline runs on the self-hosted runner, not on GitHub-hosted runners
 
 The homelab host already runs a Dockerized GitHub Actions runner
-(`/opt/data/repos/scripts/actions-runner`, labels `docker,radxa`) with the host
+(`/home/radxa/repos/scripts/actions-runner`, labels `docker,radxa`) with the host
 docker socket available (Docker-in-Docker). Workflows that touch the mail
 infrastructure run there, so `docker compose up -d` lands on the host.
 
-A second runner service was added next to the existing one so the two
+A second runner service was added next to the pre-existing one so the two
 repositories are independent:
 
-- `github-runner` — registered for `X-Ray-X/rayofsunshine-site` (unchanged).
+- the pre-existing runner (unchanged);
 - `github-runner-mailflow` — registered for `X-Ray-X/mailflow`, its own data
   directory `runner-data-mailflow`.
+
+### Mail data is mounted at the same path on the host and in the runner
+
+The runner is itself a container. Compose bind mounts are resolved by the host
+Docker daemon, so a path that exists only inside the runner (such as the
+checkout under `/runner/_work`) mounts a different directory on the host and
+disappears when the workspace is cleaned. The host clone
+`/home/radxa/repos/mailflow` is therefore mounted into the runner at the same
+absolute path, and `MAIL_DATA_DIR` is
+`/home/radxa/repos/mailflow/deploy/mail/data`. The deploy refuses to run if
+that mount is absent.
+
+The setup listener uses host port `8089` instead of `8080` because the default
+is already in use on the deployment host. Only the loopback setup/health
+listener moves; the container listener and the public inventory are otherwise
+unchanged.
 
 ### Workflow files live in the mailflow repository
 
@@ -68,10 +84,12 @@ clients.
 
 ### PR-Agent configuration
 
-The workflow uses the canonical action `The-PR-Agent/pr-agent@main` with
-`OPENAI_KEY` (repository secret) and the auto-provided `GITHUB_TOKEN`. The
-behaviours are controlled by `github_action_config.*` environment variables.
+The workflow uses `The-PR-Agent/pr-agent@v0.50.0` (pinned: it runs with a
+write-scoped `GITHUB_TOKEN` and the production Environment secrets) and the
+auto-provided `GITHUB_TOKEN`. The behaviours are controlled by
+`github_action_config.*` environment variables.
 
-For a small-scale, no-subscription setup the key can be a free-tier OpenAI
-compatible key (OpenRouter free tier, or a Google AI Studio key with a small
-Gemini model); see the README section "Continuous delivery".
+The model is the free-tier Google AI Studio Gemini, configured as
+`gemini/gemini-3-flash-preview`; the provider prefix is required or LiteLLM
+routes the request to Vertex AI, which has no credentials here. The job
+declares `environment: production` so `GEMINI_API_KEY` is visible.

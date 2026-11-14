@@ -40,7 +40,7 @@ The deployment MUST NOT change the published port inventory.
 
 #### Scenario: port inventory is unchanged
 - **WHEN** a deployment is applied
-- **THEN** the published ports are exactly 993, 465, 443 (loopback) and 8080
+- **THEN** the published ports are exactly 993, 465, 443 (loopback) and 8089
   (loopback), and no port 25 is published.
 
 ### Requirement: secrets never enter the repository

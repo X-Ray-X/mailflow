@@ -38,7 +38,7 @@ for cmd in docker curl openssl python3; do
 done
 
 DATA_DIR="${MAIL_DATA_DIR:-./data}"
-SETUP_PORT="${MAIL_SETUP_PORT:-8080}"
+SETUP_PORT="${MAIL_SETUP_PORT:-8089}"
 HTTPS_PORT="${MAIL_HTTPS_PORT:-443}"
 
 DC="docker compose -f compose.yaml"
@@ -49,14 +49,17 @@ CRED_FILE="${DATA_DIR}/secrets/admin.cred"
 
 # --- filesystem ------------------------------------------------------------
 
+# The image runs as uid/gid 2000. A bind mount created by root must be handed
+# over, or the server cannot read the TLS key or write its data.
+own_data() {
+  if [ "$(id -u)" = "0" ]; then
+    chown -R 2000:2000 "$DATA_DIR/etc" "$DATA_DIR/lib" "$DATA_DIR/tls"
+  fi
+}
+
 mkdir -p "$DATA_DIR/etc" "$DATA_DIR/lib" "$DATA_DIR/tls" "$DATA_DIR/secrets"
 chmod 700 "$DATA_DIR/secrets"
-
-# The image runs as uid/gid 2000. A bind mount created by root must be handed
-# over, or the server cannot write its data.
-if [ "$(id -u)" = "0" ]; then
-  chown -R 2000:2000 "$DATA_DIR/etc" "$DATA_DIR/lib"
-fi
+own_data
 
 json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g'
@@ -131,6 +134,7 @@ field() {
 if [ ! -f "$DATA_DIR/etc/config.json" ]; then
   say "no configuration found; starting in bootstrap mode"
   gen_tls
+  own_data
   $DCB up -d
   wait_for "http://127.0.0.1:${SETUP_PORT}/jmap/session" 60 \
     || die "setup listener did not answer on port ${SETUP_PORT}"
@@ -162,6 +166,7 @@ else
   [ -f "$CRED_FILE" ] \
     || die "configuration exists but ${CRED_FILE} is missing; restore it or remove ${DATA_DIR} (destroys all mail) and bootstrap again"
   gen_tls
+  own_data
   $DC up -d
 fi
 
