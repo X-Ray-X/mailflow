@@ -88,7 +88,7 @@ Publish IMAPS and authenticated submission. Do not publish port 25: there is no 
 
 Administrative and JMAP HTTP endpoints stay bound to loopback on the host, or are exposed only over the tailnet, because the Go service will eventually reach them from the same host.
 
-Resolved port map: `993` (IMAPS) and `465` (submission, implicit TLS) published on all interfaces; `443` (JMAP and management, HTTPS) and `8080` (setup and health, plain HTTP) bound to `127.0.0.1` only; `25`, `995`, and `4190` stay inside the container network. This is asserted by `scripts/verify.sh` against `docker compose ps`, not just documented.
+Resolved port map: `993` (IMAPS) and `465` (submission, implicit TLS) published on all interfaces; `443` (JMAP and management, HTTPS) and `8089` (setup and health, plain HTTP) bound to `127.0.0.1` only; `25`, `995`, and `4190` stay inside the container network. This is asserted by `scripts/verify.sh` against `docker compose ps`, not just documented.
 
 ### Accounts: scripted bootstrap through the documented management API, secrets on the host
 

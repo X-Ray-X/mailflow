@@ -29,7 +29,7 @@ The JMAP hostname must be the certificate's name. The stack publishes `443` on
 loopback only, so a process on the host — the future Go service — reaches it at
 `https://127.0.0.1:443` while presenting `mail.mailflow.test` as the TLS server
 name, or after `mail.mailflow.test` is resolvable to `127.0.0.1`. There is no
-plaintext management port once the server is configured; `8080` remains an
+plaintext management port once the server is configured; `8089` remains an
 unauthenticated health/setup listener.
 
 ## Session document

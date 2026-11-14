@@ -7,7 +7,7 @@
 - [x] 1.2 The gate reads only the rendered config (`docker compose config`:
   services, images, ports), never the live stack, so it tests the pull request
   rather than the host. Ports are compared in ascending order
-  (`443,465,993,8080`).
+  (`443,465,993,8089`).
 - [x] 1.3 Confirm the gate passes on a pull request. Run `43555418517`
   (PR #2, `a0b0f1d`) passed in 22s. The first attempt failed with
   `IndentationError`: the multi-line Python was indented inside the YAML block
@@ -25,6 +25,11 @@
   merged into `stalwart-local-environment`, not `main`, so `deploy.yml`
   (push to `main`) has never run. Verify after the first `main` deployment:
   the job deploys the stack and the summary shows the verdict.
+- [ ] 2.4 Mount `/path/to/mailflow` into the runner container at the
+  same absolute path and use
+  `MAIL_DATA_DIR=/path/to/mailflow/deploy/mail/data`. Confirmed from a
+  read-only probe: without it, the host daemon resolves bind mounts outside the
+  checkout and the mail data is not persistent.
 
 ## 3. Add PR-Agent to the PR flow
 
