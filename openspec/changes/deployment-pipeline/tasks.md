@@ -20,9 +20,10 @@
 - [x] 2.2 Create the GitHub Environment `production` with secrets
   `MAIL_BOOTSTRAP_PASSWORD`, `MAIL_ACCOUNT_ALICE_PASSWORD`,
   `MAIL_ACCOUNT_BOB_PASSWORD` (all required for a deployment).
-- [x] 2.3 Open a pull request and observe the deployment run on the self-hosted
-  runner. Verify: the job deploys the stack on the host and the summary shows
-  the verdict (PR #1 open → branch `add-deployment-pipeline`).
+- [ ] 2.3 Observe the deployment run on the self-hosted runner. PR #1 was
+  merged into `stalwart-local-environment`, not `main`, so `deploy.yml`
+  (push to `main`) has never run. Verify after the first `main` deployment:
+  the job deploys the stack and the summary shows the verdict.
 
 ## 3. Add PR-Agent to the PR flow
 
@@ -34,10 +35,12 @@
   (`gemini/gemini-3-flash-preview`), otherwise the bare model id is routed to
   Vertex AI and fails with `DefaultCredentialsError`. No fallback model is
   configured (`[]`).
-- [x] 3.2 Add the GitHub Environment secret `GEMINI_API_KEY` (free-tier Google
-  AI Studio key). Verify: the workflow references the secret and the gate passes.
-- [x] 3.3 Open a pull request and observe PR-Agent's review/describe/improve
-  comments. Verify: the comments appear on PR #1 (branch `add-deployment-pipeline`).
+- [x] 3.2 Wire the GitHub Environment secret `GEMINI_API_KEY` (free-tier Google
+  AI Studio key) into the workflow. The first run did not authenticate: the
+  bare model id was routed to Vertex AI.
+- [ ] 3.3 Observe PR-Agent's review/describe/improve comments. Run
+  `43553398458` failed before posting them; re-verify on the next pull request
+  after the `gemini/` prefix fix.
 
 ## 4. Record the change in OpenSpec
 
