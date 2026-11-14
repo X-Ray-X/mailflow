@@ -28,9 +28,12 @@
 ## 3. Add PR-Agent to the PR flow
 
 - [x] 3.1 Write `.github/workflows/pr-agent.yml` using
-  `The-PR-Agent/pr-agent@main` with the GitHub Environment secret
+  `The-PR-Agent/pr-agent@v0.50.0` with the GitHub Environment secret
   `GEMINI_API_KEY` (via `GOOGLE_AI_STUDIO.GEMINI_API_KEY`), `GITHUB_TOKEN` and
-  the `github_action_config.*` flags. Uses free-tier Gemini through Google AI
+  the `github_action_config.*` flags. The job declares
+  `environment: production` so the Environment secret is visible; that also
+  makes the mail secrets readable by the action, which is accepted for now.
+  Uses free-tier Gemini through Google AI
   Studio: `config.model` must carry the LiteLLM provider prefix
   (`gemini/gemini-3-flash-preview`), otherwise the bare model id is routed to
   Vertex AI and fails with `DefaultCredentialsError`. No fallback model is
