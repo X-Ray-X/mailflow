@@ -1,0 +1,33 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  pr_agent_job:
+    if: github.event.sender.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: The-PR-Agent/pr-agent@main
+        env:
+          # Google AI Studio free tier: GEMINI_API_KEY already lives in the
+          # "production" GitHub Environment (see README). No paid subscription.
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Free-tier Gemini (small). Swap the id if your PR-Agent version rejects
+          # it; the workflow log will say so.
+          config.model: "gemini-3-flash-preview"
+          config.fallback_models: '[]'
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_improve: "true"
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "synchronize"]'
