@@ -19,16 +19,16 @@ jobs:
         id: pragent
         uses: The-PR-Agent/pr-agent@main
         env:
-          # OpenAI-compatible key: provide it as a repository secret (Settings →
-          # Secrets and variables → Actions → New repository secret) and name it
-          # OPENAI_KEY so the value lands in this env var.
-          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          # Free-tier Google AI Studio Gemini key (no paid subscription).
+          # The GitHub Environment secret GEMINI_API_KEY is injected via this
+          # env var name (dot in name is valid for GitHub Actions env keys).
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PR-Agent documented config keys, mirrored as environment variables.
           # The dot-keys are valid as Linux runner env var names and map onto
           # the model / behaviour settings.
-          config.model: "gpt-6.1-sol"
-          config.fallback_models: '["gpt-6-luna"]'
+          config.model: "gemini-3-flash-preview"
+          config.fallback_models: '["gemini-2.5-flash-lite"]'
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "true"
