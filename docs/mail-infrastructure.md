@@ -358,9 +358,10 @@ docker run --rm --net container:mailflow-stalwart --cap-add NET_ADMIN alpine \
 docker restart mailflow-stalwart
 ```
 
-Last run: **37/37 checks passed** on the local OrbStack stack (25 full, 6 after
-restart, 6 after recreation). The same script is the authority on the deployed
-host, but its last host run predates the mailbox-rename and no-egress checks.
+Last run: **37/37 checks passed** from a stopped stack on the local OrbStack stack
+(25 full, 6 after restart, 6 after recreation). The same script is the authority
+on the deployed host, but its last host run predates the mailbox-rename and
+no-egress checks.
 
 ### Spec scenario coverage
 
@@ -374,7 +375,7 @@ protocols. Desktop results are from Thunderbird on macOS.
 | mail-infrastructure | Pinned release is the running release | PASS — image checked by `verify.sh` |
 | mail-infrastructure | Restart preserves mail | PASS |
 | mail-infrastructure | Recreation preserves mail | PASS |
-| mail-infrastructure | Host reboot preserves mail | NOT VERIFIED — the host has not been rebooted since deployment; needs a maintenance window |
+| mail-infrastructure | Host reboot preserves mail | PARTIAL — host rebooted 2026-11-15; container, config, TLS material and accounts returned, message and flag survival not confirmed |
 | mail-infrastructure | Internal delivery without internet | PASS — full run with the container's default route removed, so no egress was possible |
 | mail-infrastructure | No external egress | PASS — `550`, empty queue, refusal event |
 | mail-infrastructure | Accounts authenticate independently | PASS |
@@ -459,6 +460,14 @@ new release migrated data.
   macOS was verified with both demo accounts and a delivered test message, so
   the desktop requirement is met; the [Connect a mail client](#connect-a-mail-client)
   steps cover mobile CA trust and hostname resolution for when a phone is added.
+- **Host-reboot message survival** was not confirmed. The host was rebooted on
+  2026-11-15: the container returned under its restart policy, and the deploy
+  run after it reported `configuration present`, the existing certificate
+  object, and both accounts, so configuration, TLS material, and accounts
+  survived. Whether individual messages and flags survived needs an
+  authenticated session; the operator declined to run verification scripts on
+  the host, so this is recorded rather than asserted. Restart and recreation
+  exercise the same persistence mechanism on the same data path.
 - The first start downloaded the WebUI and ASN/Geo data from GitHub; a first
   start without internet would leave those resources missing, which does not
   affect mail protocols. Delivery on a running stack was verified with egress
