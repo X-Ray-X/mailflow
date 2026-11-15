@@ -1,0 +1,5 @@
+.git
+certs
+scripts
+**/*_test.go
+README.md
