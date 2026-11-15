@@ -169,8 +169,17 @@ Neither the development machine nor the runner is guaranteed a Go toolchain, so
 multi-stage on the same version. The exact version is chosen at implementation time
 from the current stable release and recorded in the Dockerfile and `docs/`.
 
+The deployment builds the image on the host runner and tags it by commit. The
+runner drives the host's Docker daemon, so the image it builds is the image the
+application runs, and an older commit's tag is still present for rollback. A
+registry would add credentials and a network hop for a single-host homelab, and
+would make the deploy depend on a service the change does not otherwise use.
+
 - **Alternative: install Go on the host.** Works, but makes the build depend on
   unversioned host state and leaves the runner unverified.
+- **Alternative: push to a registry.** Rejected for this change: no consumer
+  needs to pull the image elsewhere, and the extra moving part would be
+  unverifiable from the development machine.
 
 ## Risks / Trade-offs
 
