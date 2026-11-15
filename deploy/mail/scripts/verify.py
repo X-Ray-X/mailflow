@@ -392,6 +392,24 @@ def full_phase(client, accounts, state_path, admin_credentials):
         lambda: _expect(uids_with_subject(fourth, "Projects", subject), "not found in Projects"))
     run("the moved message is no longer in the inbox",
         lambda: _expect(not uids_with_subject(bob_conn, "INBOX", subject), "still in INBOX"))
+
+    # Rename belongs to the same requirement: another client must see the new
+    # name, and the message must move with the mailbox. Rename back afterwards
+    # so the state file and the persistence phase keep finding "Projects".
+    renamed = "Projects2"
+    typ, data = bob_conn.rename("Projects", renamed)
+    run("a custom mailbox can be renamed",
+        lambda: _expect(typ == "OK", f"RENAME failed: {data}"))
+    run("a second client sees the renamed mailbox and not the old name",
+        lambda: _expect(
+            renamed in _names(fourth) and "Projects" not in _names(fourth),
+            _listing(fourth),
+        ))
+    run("the message moved with the renamed mailbox",
+        lambda: _expect(uids_with_subject(fourth, renamed, subject), "not found after rename"))
+    typ, data = bob_conn.rename(renamed, "Projects")
+    run("the mailbox can be renamed back",
+        lambda: _expect(typ == "OK", f"RENAME back failed: {data}"))
     fourth.logout()
 
     # Sent record. Stalwart does not create this copy itself: standard clients
@@ -479,7 +497,7 @@ def _expect(condition, detail):
     return "ok"
 
 
-def _listing(conn):
+def _names(conn):
     typ, data = conn.list()
     if typ != "OK":
         raise CheckFailure(f"mailbox listing failed: {data}")
@@ -492,7 +510,11 @@ def _listing(conn):
         match = re.search(r'"([^"]*)"\s*$', text)
         if match:
             names.append(match.group(1))
-    return ", ".join(names)
+    return names
+
+
+def _listing(conn):
+    return ", ".join(_names(conn))
 
 
 def _parts_ok(raw):
