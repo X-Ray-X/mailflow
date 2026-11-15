@@ -68,7 +68,7 @@ Clients must validate the certificate, so a self-signed certificate with "disabl
 1. A certificate for the tailnet hostname (for example via `tailscale cert`), which is publicly trusted and needs no phone-side CA installation. Subject to HTTPS certificates being enabled for the tailnet, which must be verified rather than assumed.
 2. An internal CA whose root is installed once on each client, documented explicitly.
 
-Either way, the **canonical hostname** is the certificate's hostname. Clients connect to that name, not to a bare LAN IP, because an IP would never match the certificate. Tailscale MagicDNS makes this work over the tailnet; for LAN-only clients the same name must resolve, or the internal CA path is used.
+Either way, the **canonical hostname** is the certificate's hostname. Clients connect to that name, not to a bare LAN IP, because an IP would never match the certificate. Tailscale MagicDNS resolves `*.ts.net` names by default, so a custom hostname needs a hosts entry or a split-DNS record; the certificate path does not change.
 
 This is the decision most likely to waste an evening if reversed, which is why it is made here rather than during implementation.
 
@@ -121,7 +121,7 @@ The behavior that standard clients actually rely on is the one recorded in the s
 - **Refusing external recipients may not be a single toggle** → resolved: `MtaStageRcpt.allowRelaying` plus `ReloadSettings`, observed as `550 5.7.1 Relay not allowed.` with an empty outbound queue. If a future release changes the default or the singleton, the verification script fails rather than the requirement silently regressing.
 - **arm64 image unavailable for the chosen release** → resolved: `v1.1.0` publishes a native `linux/arm64` manifest, confirmed with `docker buildx imagetools inspect`.
 - **Volume mishandling during experiments** → the data path is explicit and documented; back up the directory before any upgrade or configuration experiment. Restore requires `up -d --force-recreate`: `start` reuses the existing bind mount and keeps reading the directory that was moved aside.
-- **Multi-client flag consistency depends on IMAP extension support** → verified with independent simultaneous IMAP connections: read and flagged state set on one is visible on another, and survives reconnect. This used one client implementation from two sessions, not two different client products; the difference is recorded as a gap rather than smoothed over.
+- **Multi-client flag consistency depends on IMAP extension support** → verified with independent simultaneous IMAP connections: read and flagged state set on one is visible on another, and survives reconnect. This used one client implementation from two sessions; cross-product flag consistency was not exercised. Thunderbird on macOS covers desktop account setup and sending; the mobile client remains a gap.
 - **First start needs internet** → the image downloads the WebUI and spam rules on first boot. Mail protocols work without them, but a fully offline first start leaves those resources missing. Recorded in `docs/mail-infrastructure.md`.
 
 ## Migration Plan
@@ -136,11 +136,11 @@ Greenfield; nothing to migrate. Deployment is manual for this change, and steps 
 
 Rollback is `docker compose down` for this project only. The data directory is preserved; deleting it is an explicit, separate, deliberate action and never part of a restart or upgrade.
 
-Verified here: steps 1–5 on macOS arm64 with OrbStack. Not verified here: the same on the homelab host host, and the tailnet certificate path.
+Verified here: steps 1–5 on macOS arm64 with OrbStack, and the deployment on the homelab host host. The tailnet certificate path is unavailable on the current tailnet (`CertDomains` is null), so the internal CA is in use.
 
 ## Open Questions
 
 - **Which exact Stalwart release to pin** → resolved: `v1.1.0`, the current stable release, native `linux/arm64`, digest recorded in `docs/mail-infrastructure.md`.
-- **Whether the tailnet certificate path works on the homelab host** → open, blocked on host access. The internal CA is what was verified; the design keeps `tailscale cert` as the production preference.
-- **Whether the same procedure works on the target host** → open, blocked on host access. The image architecture is confirmed, but Docker, ports, and persistence were only exercised locally.
-- **Whether two distinct client products behave as the two-session check does** → open; no desktop or mobile client was available. The behavioral claims are verified at the protocol level, not across client families.
+- **Whether the tailnet certificate path works on the homelab host** → resolved for now: the tailnet is reachable but HTTPS certificates are disabled (`CertDomains` is null), so `tailscale cert` is unavailable. The internal CA is the chosen path; enabling tailnet HTTPS certificates remains the production preference.
+- **Whether the same procedure works on the target host** → resolved: the deployment workflow ran on the homelab host and the container is healthy with persistent host mounts. Host reboot persistence remains unverified.
+- **Whether two distinct client products behave as the two-session check does** → partially verified: Thunderbird on macOS was configured with both accounts and delivered a test message on 2026-11-15. The mobile client remains open, and cross-product flag consistency was not exercised.
