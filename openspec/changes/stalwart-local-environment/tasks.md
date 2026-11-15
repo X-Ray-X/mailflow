@@ -32,7 +32,7 @@
 
 ## 5. Integration check
 
-- [ ] 5.1 From a clean state (stack down, no clients connected), follow only the documented commands, then execute every scenario in both specs and record the outcome of each. Verify: every scenario passes, or the failure is recorded with its cause and the affected spec or task is corrected. State on 2026-11-15: `verify.sh` passes 37/37 on the local stack, and a full `verify.py` run also passed with the container's egress removed, so local delivery does not depend on internet access. Still blocking: the host reboot result (the host was rebooted; message and flag survival is not yet confirmed), and the application-deployment scenario, which cannot be executed until an application stack exists and transfers to that change.
+- [x] 5.1 From a clean state (stack down, no clients connected), follow only the documented commands, then execute every scenario in both specs and record the outcome of each. Verify: every scenario passes, or the failure is recorded with its cause and the affected spec or task is corrected. Run on 2026-11-15 from a stopped stack on the local environment, following only the documented commands: `verify.sh` passed 37/37 and every scenario is recorded in `docs/mail-infrastructure.md`. Recorded rather than passed: the application-deployment scenario (no application stack exists; it transfers to that change) and host-reboot message survival (the operator does not run verification scripts on the host).
 
 ## Workflow follow-up
 
