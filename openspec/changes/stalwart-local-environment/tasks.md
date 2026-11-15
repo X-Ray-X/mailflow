@@ -32,7 +32,7 @@
 
 ## 5. Integration check
 
-- [ ] 5.1 From a clean state (stack down, no clients connected), follow only the documented commands, then execute every scenario in both specs and record the outcome of each. Verify: every scenario passes, or the failure is recorded with its cause and the affected spec or task is corrected.
+- [ ] 5.1 From a clean state (stack down, no clients connected), follow only the documented commands, then execute every scenario in both specs and record the outcome of each. Verify: every scenario passes, or the failure is recorded with its cause and the affected spec or task is corrected. State on 2026-11-15: `verify.sh` passes 37/37 on the local stack, and a full `verify.py` run also passed with the container's egress removed, so local delivery does not depend on internet access. Still blocking: task 3.2 (mobile client), and a host reboot for the reboot-persistence scenario. The application-deployment scenario cannot be executed until an application stack exists; it transfers to that change.
 
 ## Workflow follow-up
 

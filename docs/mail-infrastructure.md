@@ -341,12 +341,26 @@ The script checks the deployment and exercises the specs through real IMAP and
 SMTP clients with certificate verification on. It covers: certificate validation
 on both client ports, independent account authentication, delivery to an open
 connection, exactly one copy, MIME plain/HTML/attachment fidelity by SHA-256,
-shared read and flagged state, reconnect persistence, a custom mailbox and a
-moved message, the client's sent copy, refusal of an external recipient with no
-queued message, refusal of unauthenticated submission, and survival of all of it
-across a stack stop/start and a container recreation.
+shared read and flagged state, reconnect persistence, a custom mailbox created,
+renamed, and moved into, the client's sent copy, refusal of an external
+recipient with no queued message, refusal of unauthenticated submission, and
+survival of all of it across a stack stop/start and a container recreation.
 
-Last run: **33/33 checks passed** (21 full, 6 after restart, 6 after recreation).
+To exercise delivery with no internet access, remove the container's default
+route so no egress is possible, run the checks, then restart the container to
+restore it. Published client ports stay reachable because they are on the
+container's own subnet:
+
+```sh
+docker run --rm --net container:mailflow-stalwart --cap-add NET_ADMIN alpine \
+  sh -c 'apk add -q iproute2 && ip route del default'
+./scripts/verify.sh
+docker restart mailflow-stalwart
+```
+
+Last run: **37/37 checks passed** on the local OrbStack stack (25 full, 6 after
+restart, 6 after recreation). The same script is the authority on the deployed
+host, but its last host run predates the mailbox-rename and no-egress checks.
 
 ### Spec scenario coverage
 
@@ -360,8 +374,8 @@ protocols. Desktop results are from Thunderbird on macOS.
 | mail-infrastructure | Pinned release is the running release | PASS — image checked by `verify.sh` |
 | mail-infrastructure | Restart preserves mail | PASS |
 | mail-infrastructure | Recreation preserves mail | PASS |
-| mail-infrastructure | Host reboot preserves mail | NOT VERIFIED — no reboot of a host was performed |
-| mail-infrastructure | Internal delivery without internet | PARTIAL — local delivery passes, host-offline case untested |
+| mail-infrastructure | Host reboot preserves mail | NOT VERIFIED — the host has not been rebooted since deployment; needs a maintenance window |
+| mail-infrastructure | Internal delivery without internet | PASS — full run with the container's default route removed, so no egress was possible |
 | mail-infrastructure | No external egress | PASS — `550`, empty queue, refusal event |
 | mail-infrastructure | Accounts authenticate independently | PASS |
 | mail-infrastructure | No credentials in the repository | PASS — ignored `.env`, grep finds no password |
@@ -369,13 +383,13 @@ protocols. Desktop results are from Thunderbird on macOS.
 | mail-infrastructure | Advertised hostname matches the certificate | PASS — SANs match the documented names |
 | mail-infrastructure | Port inventory matches documentation | PASS |
 | mail-infrastructure | Unauthenticated submission is refused | PASS — `503 5.5.1` |
-| mail-infrastructure | Application deployment leaves mail untouched | NOT EXECUTED — no application stack exists yet; the boundary is a separate Compose project |
+| mail-infrastructure | Application deployment leaves mail untouched | NOT EXECUTED — no application stack exists yet; the boundary is a separate Compose project and the app-stack change owns this scenario |
 | mail-infrastructure | Runs on the target host | PASS — deployed on the arm64 host with the native image |
 | mailbox-access | Client completes account setup | PASS — protocol client and Thunderbird (macOS) |
 | mailbox-access | Sending succeeds | PASS — protocol client and Thunderbird (macOS) |
 | mailbox-access | Attachment survives delivery | PASS — SHA-256 match |
 | mailbox-access | Custom mailbox round-trips | PASS |
-| mailbox-access | Mailbox rename | NOT VERIFIED — create and delete were exercised, rename was not |
+| mailbox-access | Mailbox rename | PASS — `RENAME`, visible from a second connection, message moves with it |
 | mailbox-access | Read state is shared between clients | PASS |
 | mailbox-access | Flag state survives reconnect | PASS |
 | mailbox-access | Submitted message appears in sent mailbox | PASS — client APPEND |
