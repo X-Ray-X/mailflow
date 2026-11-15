@@ -66,10 +66,10 @@ than a secret because the summary prints it, and secrets would be masked.
 ### Host readiness (verified 2026-11-14)
 
 On the deployment host, `docker compose version` reports `2.26.1-4`,
-`tailscale status` reports the host as `rock-5t` on the tailnet, and the
-configured `MAIL_DATA_DIR` exists with `etc/`, `lib/` and `tls/` owned by
-`2000:2000`. The host's tailnet address is supplied by the `MAIL_TAILNET_IP`
-environment variable rather than tracked here.
+`tailscale status` reports the host on the tailnet, and the configured
+`MAIL_DATA_DIR` exists with `etc/`, `lib/` and `tls/` owned by `2000:2000`.
+The host's tailnet address is supplied by the `MAIL_TAILNET_IP` environment
+variable rather than tracked here.
 
 ## Files
 
@@ -223,6 +223,76 @@ is therefore the chosen certificate path for now; see
 up with the data directory. If it is lost while `config.json` exists, the script
 stops with an explicit error rather than creating a second administrator.
 
+## Connect a mail client
+
+The server certificate is signed by the internal CA at `data/tls/ca.pem`. A
+client must trust that CA and resolve the canonical hostname; it must not
+disable certificate verification. The certificate covers
+`mail.mailflow.test` and `mailflow.test`, not a bare IP address.
+
+### Trust the internal CA
+
+Copy only the public certificate to the client. Never copy `ca-key.pem` or
+`privkey.pem`.
+
+From the host:
+
+```sh
+docker cp mailflow-stalwart:/etc/stalwart/tls/ca.pem ./mailflow-ca.pem
+```
+
+Install it in the client's trust store:
+
+- **Apple Mail / macOS:** `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain mailflow-ca.pem`
+- **Thunderbird:** Settings → Privacy & Security → Certificates → Manage
+  Certificates → Authorities → Import, then trust the CA. Thunderbird uses its
+  own NSS store, so the macOS keychain alone may not be enough.
+- **iOS:** install the profile, then enable full trust under Settings →
+  General → About → Certificate Trust Settings.
+- **Linux:** copy it to `/usr/local/share/ca-certificates/` and run
+  `sudo update-ca-certificates`.
+
+### Resolve the canonical hostname
+
+The client connects to `mail.mailflow.test`, not to an IP. The name must
+resolve to the host:
+
+- **Desktop:** add `<host-address> mail.mailflow.test` to the hosts file.
+- **Mobile:** Tailscale MagicDNS resolves `*.ts.net` names, not
+  `mail.mailflow.test`. Add a split-DNS route for `mailflow.test` to a DNS
+  server on the tailnet that has an A record for `mail.mailflow.test` →
+  `<host-address>`.
+- If you use a different hostname, the certificate must cover it.
+
+### Configure the account
+
+Use manual setup if the client guesses STARTTLS: both published client ports
+expect implicit TLS.
+
+| Setting | Value |
+|---|---|
+| IMAP | `mail.mailflow.test`, port `993`, SSL/TLS |
+| SMTP submission | `mail.mailflow.test`, port `465`, SSL/TLS |
+| Username | the full address, for example `alice@mailflow.test` |
+| Password | `MAIL_ACCOUNT_ALICE_PASSWORD` or `MAIL_ACCOUNT_BOB_PASSWORD` |
+
+### Verify
+
+- The client connects without a certificate warning and lists the mailboxes.
+- A message from one local account arrives in the other account's inbox.
+
+From a machine that resolves the name:
+
+```sh
+openssl s_client -connect mail.mailflow.test:993 -servername mail.mailflow.test \
+  </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -text \
+  | grep -A1 'Subject Alternative Name'
+```
+
+macOS ships LibreSSL, whose `x509` does not support `-ext`; `-text` works on
+both LibreSSL and OpenSSL.
+
 ## Configuration options and their sources
 
 Every option was read from the documentation of the pinned release
@@ -282,7 +352,7 @@ Last run: **33/33 checks passed** (21 full, 6 after restart, 6 after recreation)
 
 Status of every scenario in the change's two specs. "Protocol client" means the
 stdlib IMAP/SMTP client in `scripts/verify.py`, which is a real client of both
-protocols but not a desktop or mobile application.
+protocols. Desktop results are from Thunderbird on macOS.
 
 | Spec | Scenario | Status |
 |---|---|---|
@@ -295,14 +365,14 @@ protocols but not a desktop or mobile application.
 | mail-infrastructure | No external egress | PASS — `550`, empty queue, refusal event |
 | mail-infrastructure | Accounts authenticate independently | PASS |
 | mail-infrastructure | No credentials in the repository | PASS — ignored `.env`, grep finds no password |
-| mail-infrastructure | Client validates the certificate | PASS — both client ports, verification on |
+| mail-infrastructure | Client validates the certificate | PASS — protocol client and Thunderbird (macOS) |
 | mail-infrastructure | Advertised hostname matches the certificate | PASS — SANs match the documented names |
 | mail-infrastructure | Port inventory matches documentation | PASS |
 | mail-infrastructure | Unauthenticated submission is refused | PASS — `503 5.5.1` |
 | mail-infrastructure | Application deployment leaves mail untouched | NOT EXECUTED — no application stack exists yet; the boundary is a separate Compose project |
-| mail-infrastructure | Runs on the target host | PARTIAL — native arm64 image confirmed, Radxa itself untested |
-| mailbox-access | Client completes account setup | PASS — protocol client |
-| mailbox-access | Sending succeeds | PASS |
+| mail-infrastructure | Runs on the target host | PASS — deployed on the arm64 host with the native image |
+| mailbox-access | Client completes account setup | PASS — protocol client and Thunderbird (macOS) |
+| mailbox-access | Sending succeeds | PASS — protocol client and Thunderbird (macOS) |
 | mailbox-access | Attachment survives delivery | PASS — SHA-256 match |
 | mailbox-access | Custom mailbox round-trips | PASS |
 | mailbox-access | Mailbox rename | NOT VERIFIED — create and delete were exercised, rename was not |
@@ -312,7 +382,7 @@ protocols but not a desktop or mobile application.
 | mailbox-access | Sent record is visible from a second client | PASS |
 | mailbox-access | Delivery is immediate | PASS — open connection received it |
 | mailbox-access | No duplicate copies | PASS |
-| mailbox-access | Two client families work | NOT VERIFIED — no desktop or mobile client available |
+| mailbox-access | Two client families work | PARTIAL — Thunderbird (desktop) verified; mobile not configured |
 
 ## Backup and restore
 
@@ -369,9 +439,10 @@ new release migrated data.
   (`CN=Mailflow Internal CA`, SANs `mail.mailflow.test, mailflow.test`) is the
   chosen path for now. Enabling HTTPS certificates for the tailnet remains the
   preferred future path.
-- **Desktop and mobile clients** (Thunderbird or Apple Mail, and a phone over the
-  tailnet) were not available. Verification used Python's stdlib IMAP/SMTP
-  clients, which are real protocol clients but not two distinct client families.
+- **Mobile client** was not configured. Thunderbird on macOS was verified on
+  2026-11-15 with both demo accounts and a delivered test message, so the
+  desktop side is covered; the phone side of the two-client-family scenario
+  remains open.
 - **"No internet" delivery** was not tested with the host offline. Delivery uses
   the local domain and manual DNS, so no external lookup is involved, but that
   was not observed under an actual network cut.
