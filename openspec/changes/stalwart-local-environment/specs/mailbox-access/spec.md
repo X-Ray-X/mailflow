@@ -65,8 +65,16 @@ A message addressed to an account on the local domain SHALL be delivered to that
 - **THEN** exactly one copy appears in the recipient's inbox
 
 ### Requirement: Client version compatibility
-The documented setup SHALL be verified with at least two distinct client implementations, including one desktop client and one mobile client.
+The documented setup SHALL be verified with at least two distinct client implementations, one of which SHALL be a desktop email application. A mobile client SHALL be documented but is not required for this change.
 
-#### Scenario: Two client families work
-- **WHEN** a desktop client and a mobile client are each configured against the same account
-- **THEN** both can read, send, and observe flag changes made by the other
+#### Scenario: Desktop application works
+- **WHEN** a desktop email application is configured with the documented host, ports, and credentials
+- **THEN** it connects with certificate verification enabled, lists the account's mailboxes, and its submitted message is retained in the sent mailbox
+
+#### Scenario: A second implementation reads the same account
+- **WHEN** a second, distinct client implementation connects to the same account
+- **THEN** it authenticates and lists the same standard mailboxes with certificate verification enabled
+
+#### Scenario: Mobile guidance exists
+- **WHEN** a user wants to configure a mobile client over the tailnet
+- **THEN** the documentation covers trusting the internal CA and resolving the hostname on that platform

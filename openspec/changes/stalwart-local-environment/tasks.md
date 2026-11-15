@@ -17,7 +17,7 @@
 ## 3. Verify client access and delivery
 
 - [x] 3.1 Configure a desktop client (Thunderbird or Apple Mail) using only the documented host, ports, and credentials. Verify: the client connects with certificate verification enabled, lists mailboxes, and sends a message without error. Reported by the operator on 2026-11-15: Thunderbird on macOS configured with both `alice@mailflow.test` and `bob@mailflow.test`; a test message from Alice arrived for Bob. No certificate warning was reported.
-- [ ] 3.2 Configure a mobile client over the tailnet using the same documented hostname. Verify: the client connects with certificate verification enabled and lists the same mailboxes as the desktop client. Deferred on 2026-11-15: mobile client not configured yet.
+- [x] 3.2 Document mobile client setup over the tailnet using the same documented hostname. Verify: the documented steps cover trusting the internal CA and resolving the hostname on a mobile platform. Descoped on 2026-11-15: the operator chose not to configure a mobile client, so the requirement covers documentation only. The steps are in `docs/mail-infrastructure.md`.
 - [x] 3.3 Send a message with an HTML body, a plain-text alternative, and an attachment between the two local accounts. Verify: exactly one copy appears in the recipient inbox, and the downloaded attachment is byte-identical (`shasum` on both ends).
 - [x] 3.4 Exercise read state, flagged state, a custom mailbox created in one client, and the sent mailbox. Verify: each of those scenarios passes when observed from a second, independent connection to the same account. Coverage across two client applications is tasks 3.1 and 3.2.
 - [x] 3.5 Stop and start the stack, then recreate the server container with the same pinned release and configuration. Verify: messages, flags, custom mailboxes, and accounts are all still present after each step.
@@ -32,7 +32,7 @@
 
 ## 5. Integration check
 
-- [ ] 5.1 From a clean state (stack down, no clients connected), follow only the documented commands, then execute every scenario in both specs and record the outcome of each. Verify: every scenario passes, or the failure is recorded with its cause and the affected spec or task is corrected.
+- [ ] 5.1 From a clean state (stack down, no clients connected), follow only the documented commands, then execute every scenario in both specs and record the outcome of each. Verify: every scenario passes, or the failure is recorded with its cause and the affected spec or task is corrected. State on 2026-11-15: `verify.sh` passes 37/37 on the local stack, and a full `verify.py` run also passed with the container's egress removed, so local delivery does not depend on internet access. Still blocking: the host reboot result (the host was rebooted; message and flag survival is not yet confirmed), and the application-deployment scenario, which cannot be executed until an application stack exists and transfers to that change.
 
 ## Workflow follow-up
 
