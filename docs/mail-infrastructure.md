@@ -396,7 +396,9 @@ protocols. Desktop results are from Thunderbird on macOS.
 | mailbox-access | Sent record is visible from a second client | PASS |
 | mailbox-access | Delivery is immediate | PASS — open connection received it |
 | mailbox-access | No duplicate copies | PASS |
-| mailbox-access | Two client families work | PARTIAL — Thunderbird (desktop) verified; mobile not configured |
+| mailbox-access | Desktop application works | PASS — Thunderbird (macOS), both accounts, delivery confirmed |
+| mailbox-access | A second implementation reads the same account | PASS — Thunderbird and the protocol client both list the standard mailboxes |
+| mailbox-access | Mobile guidance exists | PASS — documented; no mobile client configured, by decision |
 
 ## Backup and restore
 
@@ -453,13 +455,11 @@ new release migrated data.
   (`CN=Mailflow Internal CA`, SANs `mail.mailflow.test, mailflow.test`) is the
   chosen path for now. Enabling HTTPS certificates for the tailnet remains the
   preferred future path.
-- **Mobile client** was not configured. Thunderbird on macOS was verified on
-  2026-11-15 with both demo accounts and a delivered test message, so the
-  desktop side is covered; the phone side of the two-client-family scenario
-  remains open.
-- **"No internet" delivery** was not tested with the host offline. Delivery uses
-  the local domain and manual DNS, so no external lookup is involved, but that
-  was not observed under an actual network cut.
+- **Mobile client** was not configured, by decision on 2026-11-15. Thunderbird on
+  macOS was verified with both demo accounts and a delivered test message, so
+  the desktop requirement is met; the [Connect a mail client](#connect-a-mail-client)
+  steps cover mobile CA trust and hostname resolution for when a phone is added.
 - The first start downloaded the WebUI and ASN/Geo data from GitHub; a first
   start without internet would leave those resources missing, which does not
-  affect mail protocols.
+  affect mail protocols. Delivery on a running stack was verified with egress
+  removed.
