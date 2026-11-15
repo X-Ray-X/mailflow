@@ -2,8 +2,8 @@
 
 ## 1. Toolchain and module scaffold
 
-- [ ] 1.1 Create the Go module at `app/` with `go.mod`, `cmd/mailflow-api/main.go`, and a multi-stage `app/Dockerfile` whose builder and runtime stages pin one stable Go release; record the chosen version in the Dockerfile comment and in `docs/api.md`. Verify with `docker buildx build --platform linux/arm64 -t mailflow-api:dev app/` and `docker image inspect mailflow-api:dev` reporting `arm64`; the runtime stage must not contain a Go toolchain.
-- [ ] 1.2 Add `app/scripts/go.sh`, a thin wrapper that runs `gofmt -l`, `go vet ./...`, and `go test ./...` inside the pinned `golang` image with the module mounted. Verify it exits non-zero on a deliberately misformatted file and zero on the clean tree, so later tasks can rely on it.
+- [x] 1.1 Create the Go module at `app/` with `go.mod`, `cmd/mailflow-api/main.go`, and a multi-stage `app/Dockerfile` whose builder and runtime stages pin one stable Go release; record the chosen version in the Dockerfile comment and in `docs/api.md`. Verify with `docker buildx build --platform linux/arm64 -t mailflow-api:dev app/` and `docker image inspect mailflow-api:dev` reporting `arm64`; the runtime stage must not contain a Go toolchain.
+- [x] 1.2 Add `app/scripts/go.sh`, a thin wrapper that runs `gofmt -l`, `go vet ./...`, and `go test ./...` inside the pinned `golang` image with the module mounted. Verify it exits non-zero on a deliberately misformatted file and zero on the clean tree, so later tasks can rely on it.
 
 ## 2. Adapter: configuration, JMAP client, identifiers, vocabulary
 
