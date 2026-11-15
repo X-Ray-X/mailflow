@@ -43,7 +43,7 @@ The service SHALL expose an unauthenticated health endpoint that reports whether
 The service image SHALL run natively on arm64, the homelab architecture, without emulation.
 
 #### Scenario: Image architecture
-- **WHEN** the published image is inspected
+- **WHEN** the image built for deployment is inspected
 - **THEN** it provides a linux/arm64 variant
 
 ### Requirement: Deployment reports a verdict
