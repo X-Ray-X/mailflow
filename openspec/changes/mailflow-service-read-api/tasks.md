@@ -1,0 +1,42 @@
+# Tasks
+
+## 1. Toolchain and module scaffold
+
+- [ ] 1.1 Create the Go module at `app/` with `go.mod`, `cmd/mailflow-api/main.go`, and a multi-stage `app/Dockerfile` whose builder and runtime stages pin one stable Go release; record the chosen version in the Dockerfile comment and in `docs/api.md`. Verify with `docker buildx build --platform linux/arm64 -t mailflow-api:dev app/` and `docker image inspect mailflow-api:dev` reporting `arm64`; the runtime stage must not contain a Go toolchain.
+- [ ] 1.2 Add `app/scripts/go.sh`, a thin wrapper that runs `gofmt -l`, `go vet ./...`, and `go test ./...` inside the pinned `golang` image with the module mounted. Verify it exits non-zero on a deliberately misformatted file and zero on the clean tree, so later tasks can rely on it.
+
+## 2. Adapter: configuration, JMAP client, identifiers, vocabulary
+
+- [ ] 2.1 Implement configuration loading from the environment with the required and optional values from design decision 8, and fail startup naming the offending value. Verify with table-driven tests covering every missing and malformed required value, every default, and one valid full set.
+- [ ] 2.2 Implement the JMAP client: session read, account resolution from `primaryAccounts["urn:ietf:params:jmap:mail"]`, one method call per request, HTTP Basic from the caller's credentials, per-request `context` timeout, and TLS with the internal CA and `MAILFLOW_JMAP_HOSTNAME` as server name. Verify with tests against an `httptest` TLS server for session parsing, account resolution, timeout expiry, unreachable host, and rejection of a certificate signed by another CA; each failure must map to a Mailflow error, not a raw error.
+- [ ] 2.3 Implement identifier encoding and decoding (`mb1_`, `msg1_`, base64url) with a versioned prefix. Verify with a round-trip test, an assertion that an encoded value differs from the vendor id and from the account address, and a malformed-input test returning the invalid-identifier error.
+- [ ] 2.4 Implement the vocabulary mapping in one package: `$seen` → `read`, `$flagged` → `starred`, `hasAttachment` pass-through, mailbox role `none` → `custom`, timestamps from `receivedAt`, and an explicit property list on every `Email/get`. Verify with table tests for each mapping, for an unknown keyword being ignored, and for a response built from a full `Email/get` payload containing no vendor field names.
+- [ ] 2.5 Update `docs/integration-surface.md` with the 2026-11-15 probe results: `Email/query` paging with `anchor`/`anchorOffset`, `bodyValues` needing to be named in `properties`, unknown mailbox returning empty `ids`, unknown message returning `notFound`, and the observed role set. Verify the document lists each result under verified and no longer lists those items as unverified.
+
+## 3. Read contract endpoints
+
+- [ ] 3.1 Implement the HTTP server: method-and-path routing on `net/http`, JSON encoding, the single error shape, structured `slog` logging that never records credentials or authorization headers, and graceful shutdown. Verify with handler tests asserting the uniform error body for 404, 405, and a handler failure, and a log test asserting no credential value appears in captured output.
+- [ ] 3.2 Implement `GET /v1/mailboxes`. Verify with a handler test against a fake adapter asserting identifier, name, role, and unread/total counts, and a payload assertion that no vendor capability URN, method name, or vendor id appears.
+- [ ] 3.3 Implement `GET /v1/mailboxes/{mailboxID}/messages` with page size default and maximum, newest-first ordering, and cursor pagination via `anchor` + `anchorOffset` returning a `hasMore` signal. Verify with handler tests for clamping an oversized page request, walking a four-message mailbox at page size two with no repeats, an empty final page, and a deleted anchor returning `invalid_cursor`.
+- [ ] 3.4 Implement `GET /v1/messages/{messageID}` with subject, sender, recipients, received time, read and starred state, `hasAttachment`, and a text body capped by `MAILFLOW_BODY_MAX_BYTES` with a truncation indicator. Verify with handler tests for a normal body, a body over the cap being truncated and flagged, a message in `notFound` returning not-found, and a body larger than the cap never being returned whole.
+- [ ] 3.5 Implement authentication pass-through and scoping: Basic credentials forwarded per request, account taken only from the session, no user store, and a foreign or unknown identifier reported as not-found. Verify with tests for missing credentials, rejected credentials, and another account's identifier, each returning the single authentication or not-found error with no vendor text; add a test asserting the service starts and serves with no database or credential file present.
+- [ ] 3.6 Write `docs/api.md`: the v1 read contract, authentication, pagination, error codes, configuration, port map, and run instructions. Verify by starting the service in the container against the local stack and running every documented request verbatim, recording the transcript.
+
+## 4. Application deployment unit
+
+- [ ] 4.1 Add `deploy/app/compose.yaml` (project `mailflow-app`, one service, publishing `127.0.0.1:8080`) and `deploy/app/.env.example` naming only variables. Verify with `docker compose -f deploy/app/compose.yaml config` showing one service and no reference to the mail project, volume, or data directory, and with `docker compose -p mailflow-mail ps` unchanged after starting and stopping the app project.
+- [ ] 4.2 Add `.github/workflows/deploy-app.yml`: build and push the arm64 image, copy `ca.pem` into `deploy/app/certs/` with `docker cp` from the mail container, bring the app project up, and check health with `docker exec` inside the app container. Verify the workflow reaches a verdict and its summary records the image tag, the health result, and the mail container ids before and after.
+- [ ] 4.3 Extend the compose-contract job in `.github/workflows/ci.yml` to render `deploy/app/compose.yaml` and assert it declares only the application service and no mail service, volume, or host data path. Verify the gate passes on the change's pull request and fails when a mail service is temporarily added to the app compose file.
+- [ ] 4.4 Update `README.md` with the service, its quickstart, the port map, and the configuration names, and add the new workflow and environment values to the `production` list. Verify every command in the new quickstart runs as written from a clean checkout, and the documented port map matches `docker compose config`.
+
+## 5. Integration verification
+
+- [ ] 5.1 Run the full read path against the running stack: list mailboxes, page a four-message mailbox at page size two to exhaustion, and fetch one message body, using credentials for both a normal account and a second account. Verify the transcript shows newest-first order, no repeated message across pages, a body matching the sent content, and one account unable to read the other's identifiers.
+- [ ] 5.2 Apply the `AGENTS.md` replaceability checklist to the recorded payloads: no vendor object types, method names, error codes, or IMAP vocabulary; Mailflow identifiers; no account name or domain as a key; versioned additive contract. Verify with a test or script that scans the recorded payloads for forbidden tokens and fails on a match.
+- [ ] 5.3 Exercise the mail-untouched scenario: record the mail container ids, image digests, and volume listing, then deploy, restart, and stop the application project. Verify the mail container ids, digests, and volume listing are identical afterwards and an IMAP login still succeeds.
+- [ ] 5.4 Record the verification outcome, including anything not verified and why, in the verification table in `docs/mail-infrastructure.md` and in the change's pull request description. Verify the table's "application deployment leaves mail untouched" row no longer reads as not executed, and every remaining gap names its cause.
+
+## Workflow follow-up
+
+- Open the pull request for review; do not merge until the user asks.
+- Archive the change after the pull request is merged and the deploy run on `main` has passed.
