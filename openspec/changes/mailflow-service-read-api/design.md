@@ -36,14 +36,25 @@ The development machine has no Go toolchain, so the design must not assume one.
 
 ## Decisions
 
-### 1. Adapt through JMAP over loopback HTTPS
+### 1. Adapt through JMAP over the mail project's network
 
-The service speaks JMAP to `https://127.0.0.1:443` with `mail.mailflow.test` as the
-TLS server name, using the internal CA.
+The service speaks JMAP to the mail container. On the host it uses
+`https://127.0.0.1/jmap/`; in its own container it joins the mail project's
+network (`mailflow-mail_default`) and dials `https://mailflow-stalwart/jmap/`.
+In both cases the TLS server name is `mail.mailflow.test`, taken from
+configuration, so the certificate is verified against its SAN rather than
+against the host in the URL.
 
+- **Alternative: publish the mail HTTPS port on the tailnet.** Rejected: it
+  widens mail's exposure to solve an application problem.
 - **Alternative: IMAP.** Rejected. It would force IMAP vocabulary into the mapping
   layer, lose the mailbox-role model, and make flag semantics the service's problem.
 - **Alternative: read Stalwart's storage.** Forbidden by the architecture invariants.
+
+Joining the mail network is not sharing a deployment unit: the network carries
+traffic, while containers, volumes, and configuration stay separate. It does
+mean the mail project must exist before the application project starts, which
+the deployment order already guarantees.
 
 ### 2. Forward the caller's credentials, keep no user store
 
@@ -82,13 +93,16 @@ and server-assigned — and caching one would cache an authentication result.
 ### 5. Cursor pagination by anchor
 
 Listing uses `sort: receivedAt desc`, `limit`, and a cursor built from the last
-returned message: `anchor: <vendor id>`, `anchorOffset: 1`. `calculateTotal` supplies
-the "more messages exist" signal.
+returned message: `anchor: <vendor id>`, `anchorOffset: 1`. `calculateTotal`
+plus the returned `position` gives `position + len(ids) < total` as the
+"more messages exist" signal, so a full page that happens to be the last one
+does not advertise a cursor.
 
 - **Alternative: `position` offsets.** Rejected: a message arriving between pages
   shifts every later offset and repeats an item, which the spec forbids.
-- A deleted anchor returns a Mailflow `invalid_cursor` error so the client can restart
-  from the first page rather than silently skipping mail.
+- A deleted anchor is answered with `anchorNotFound` by this release, which maps
+  to a Mailflow `invalid_cursor` error so the client can restart from the first
+  page rather than silently skipping mail.
 
 ### 6. Translate vocabulary in one package
 
@@ -125,19 +139,28 @@ returning an unbounded payload.
 ### 9. Deploy as its own Compose project, loopback only
 
 `deploy/app/compose.yaml`, project name `mailflow-app`, one service, publishing
-`127.0.0.1:8080`. The pipeline deploys it through its own workflow, never referencing
-the mail project.
+`127.0.0.1:8080`, and joined to the mail project's network as an external
+network. The pipeline deploys it through its own workflow, never referencing the
+mail project's containers, volumes, or configuration.
+
+Inside the container the process binds `0.0.0.0:8080`, because Docker publishes
+to the container's address rather than to its loopback. The host binding is what
+stays on loopback, so the contract is unchanged: nothing outside the host can
+reach the API in this change.
 
 - **Alternative: publish on the tailnet now.** Deferred. There is no consumer, and
   `AGENTS.md` says not to widen exposure before something needs it.
+- **Alternative: host networking for the app.** Rejected: it would reach mail's
+  loopback but makes the container's network behaviour depend on the host, and
+  the mail project's network already gives the same reach with less coupling.
 - Health is checked with `docker exec` inside the container, because the runner is
   itself a container and the host's loopback is not the runner's loopback — the same
   constraint that shaped `bootstrap.sh`.
 
-The service trusts the internal CA through a copy at `deploy/app/certs/ca.pem`, made
-during deployment with `docker cp` from the mail container. The alternative — mounting
-the mail data directory into the application — would blur the boundary between the two
-deployment units.
+The service trusts the internal CA through a copy at `deploy/app/certs/ca.pem`,
+made during deployment with `docker cp` from the mail container's
+`/etc/stalwart/tls/ca.pem`. The alternative — mounting the mail data directory
+into the application — would blur the boundary between the two deployment units.
 
 ### 10. Build and test in the pinned Go image
 
