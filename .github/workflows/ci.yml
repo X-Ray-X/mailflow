@@ -59,9 +59,11 @@ jobs:
 
       # Gate 2 — the application is its own project. It must render with one
       # service, publish on loopback only, and share nothing with the mail
-      # deployment except a copy of the CA. This job name predates the
-      # application unit; both gates live here so one required check covers
-      # every Compose project in the repository.
+      # deployment except a copy of the CA. The CA is a named volume, not a bind
+      # mount: the deploy streams it through the Docker daemon, because the
+      # runner's checkout is not a path the host daemon can resolve. This job
+      # name predates the application unit; both gates live here so one required
+      # check covers every Compose project in the repository.
       - name: application compose is a separate project
         run: |
           cd deploy/app
@@ -71,10 +73,41 @@ jobs:
           test "$services" = "api" \
             || { echo "application compose must contain only the api service, found: $services"; exit 1; }
 
-          # one service, loopback-only ports, and no bind mount except the CA
-          # copy the deploy makes. The mail data directory must never appear.
+          # one service, loopback-only ports, no bind mounts, and the CA in the
+          # app-owned volume the deploy refills. The mail data directory must
+          # never appear.
           docker compose --env-file "$env_file" config --format json \
-            | python3 -c 'import json,sys; c=json.load(sys.stdin); s=c["services"]; assert list(s)==["api"], list(s); api=s["api"]; ports=api.get("ports") or []; assert ports and all(p.get("host_ip")=="127.0.0.1" for p in ports), ports; vols=[v for v in api.get("volumes",[]) if v.get("type")=="bind"]; assert vols and all(v["source"].endswith("/certs/ca.pem") for v in vols), vols; net=c["networks"]["mail"]; assert net.get("external") is True, net; assert net.get("name")=="mailflow-mail_default", net; print("application compose is separate and loopback-only")'
+            | python3 -c '
+          import json, sys
+
+          c = json.load(sys.stdin)
+          services = c["services"]
+          assert list(services) == ["api"], list(services)
+          api = services["api"]
+
+          ports = api.get("ports") or []
+          assert ports and all(p.get("host_ip") == "127.0.0.1" for p in ports), ports
+
+          mounts = api.get("volumes") or []
+          binds = [m for m in mounts if m.get("type") == "bind"]
+          assert not binds, binds
+          ca = [m for m in mounts if m.get("type") == "volume"]
+          assert len(ca) == 1, mounts
+          mount = ca[0]
+          assert mount.get("source") == "ca", mount
+          assert mount.get("target") == "/etc/mailflow", mount
+          assert mount.get("read_only") is True, mount
+
+          net = c["networks"]["mail"]
+          assert net.get("external") is True, net
+          assert net.get("name") == "mailflow-mail_default", net
+
+          volume = c["volumes"]["ca"]
+          assert volume.get("external") is True, volume
+          assert volume.get("name") == "mailflow-app-ca", volume
+
+          print("application compose is separate and loopback-only")
+          '
 
           if docker compose --env-file "$env_file" config | grep -q "deploy/mail"; then
             echo "application compose references the mail deployment directory" >&2
