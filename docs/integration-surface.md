@@ -195,6 +195,31 @@ size of two:
   observation. The adapter still reorders by the query result rather than
   relying on it.
 
+### Identifiers are per-account, not global (probed 2026-11-16)
+
+Raw identifiers are short sequences assigned independently per account, so the
+same identifier names different objects in different accounts. Observed on the
+same stack:
+
+- alice and bob each held mailboxes `a`, `b`, `c`, `d`, `e`, and `h` for their
+  own standard mailboxes. Alice's sent mailbox `e` is not bob's sent mailbox `e`.
+- In the scoping probe, alice's private message `2aaaaah` and bob's inbox message
+  `2aaaaah` were different messages with different subjects. Bob's request for
+  alice's identifier returned *his own* message rather than an error.
+- `Mailbox/get` with another account's mailbox identifier returns this account's
+  object with that identifier, not an error; `Email/query` with a foreign mailbox
+  identifier returns empty `ids`; `Email/get` with a foreign message identifier
+  returns this account's object when one exists with that identifier.
+- A mailbox identifier that exists only in alice's account (`i`–`o` after
+  creating seven extra mailboxes) returned `notFound` for bob, and a message
+  identifier unique to alice likewise returned nothing for bob.
+
+Consequences for the service: an identifier must carry the account it was issued
+to, otherwise the same identifier would mean different things to different
+callers. The service refuses a foreign identifier locally, before asking the
+mail server. This is a wrong-answer problem, not a confidentiality problem: no
+probe made another account's content readable.
+
 ## Push notifications
 
 `eventSourceUrl` is a template with three parameters:
