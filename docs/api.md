@@ -80,6 +80,13 @@ deployment units share traffic, not files. If the local mail stack already holds
 host port 8080 (its setup listener does when `MAIL_SETUP_PORT=8080`), publish the
 API on another loopback port instead.
 
+On a deployed host, `deploy/app/.env` is host-owned. The workflow creates it from
+the example only when it is absent, rewrites only the image tag, and leaves the
+port and network name alone, so a port chosen to avoid a collision survives
+later deploys. If another container already publishes the configured port, the
+workflow fails before creating the application container and names the variable
+to change.
+
 Stop it with `docker rm -f mailflow-api`. That touches nothing in the mail
 project.
 

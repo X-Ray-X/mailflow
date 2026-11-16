@@ -46,6 +46,17 @@ The service image SHALL run natively on arm64, the homelab architecture, without
 - **WHEN** the image built for deployment is inspected
 - **THEN** it provides a linux/arm64 variant
 
+### Requirement: Host configuration survives a deploy
+The pipeline SHALL treat the host-owned deployment file as input, not output: values an operator sets for the host, such as the published loopback port, SHALL survive a deploy, and only the image tag SHALL be written by the pipeline.
+
+#### Scenario: A chosen port survives a deploy
+- **WHEN** the workflow deploys a new commit
+- **THEN** an existing `deploy/app/.env` keeps its values apart from the image tag
+
+#### Scenario: An occupied port fails before anything starts
+- **WHEN** another container already publishes the configured loopback port
+- **THEN** the workflow reports failure, names the variable to change, and starts no application container
+
 ### Requirement: Deployment reports a verdict
 The application pipeline SHALL reach a final verdict for every deployment, and SHALL verify after deploying that the service answers its health endpoint and that the mail infrastructure was not modified.
 
