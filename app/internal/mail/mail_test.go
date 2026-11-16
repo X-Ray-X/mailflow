@@ -229,6 +229,18 @@ func TestTruncateUTF8DoesNotSplitRunes(t *testing.T) {
 	}
 }
 
+func TestTruncateUTF8LeavesFittingStringsAlone(t *testing.T) {
+	const s = "aé"
+	if got := truncateUTF8(s, 1024); got != s {
+		t.Fatalf("got %q, want the whole string", got)
+	}
+	// A non-positive cap means "no limit"; the configured value is always
+	// positive, so this only guards the helper.
+	if got := truncateUTF8(s, 0); got != s {
+		t.Fatalf("zero cap returned %q, want the whole string", got)
+	}
+}
+
 func TestServiceMailboxesOrdersAndMaps(t *testing.T) {
 	f := &fakeUpstream{mailboxes: []jmap.Mailbox{
 		{ID: "m2", Name: "Receipts", Role: "none", SortOrder: 20, TotalEmails: 2},
@@ -265,6 +277,23 @@ func TestServiceMapsTimeoutToUnavailable(t *testing.T) {
 	_, err := newTestService(f).Mailboxes(context.Background(), testCreds)
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+}
+
+// An error the adapter cannot classify is a defect here, not an outage. It must
+// not be dressed up as service-unavailable, which would tell a client to retry a
+// request that will keep failing.
+func TestServiceDoesNotDisguiseUnknownErrorsAsUnavailable(t *testing.T) {
+	f := &fakeUpstream{sessionErr: errors.New("unexpected adapter state")}
+	_, err := newTestService(f).Mailboxes(context.Background(), testCreds)
+	if err == nil {
+		t.Fatal("Mailboxes swallowed the error")
+	}
+	if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want it to keep its own class", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected adapter state") {
+		t.Fatalf("error = %v, want the cause preserved for the log", err)
 	}
 }
 
@@ -389,6 +418,36 @@ func TestServiceMessagesRejectsIdentifierFromAnotherAccount(t *testing.T) {
 	}
 	if f.queryCalls != 0 {
 		t.Fatal("queried a mailbox identifier from another account")
+	}
+}
+
+// A message deleted between the query and the fetch must not leave the caller
+// with hasMore set and no cursor to follow.
+func TestServiceMessagesKeepsCursorWhenTheLastMessageVanishes(t *testing.T) {
+	f := &fakeUpstream{
+		mailboxExists: true,
+		query:         jmap.QueryResult{IDs: []string{"e3", "e2"}, Total: 4, Position: 0},
+		emails:        []jmap.Email{{ID: "e3", Subject: "three"}},
+	}
+	page, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{Limit: 2})
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if !page.HasMore {
+		t.Fatal("page reports no more messages")
+	}
+	if len(page.Messages) != 1 || page.Messages[0].Subject != "three" {
+		t.Fatalf("messages = %+v, want only the message that could be fetched", page.Messages)
+	}
+	if page.NextCursor == "" {
+		t.Fatal("hasMore is set but no cursor was issued")
+	}
+	_, anchor, err := ids.ParseCursor(page.NextCursor)
+	if err != nil {
+		t.Fatalf("cursor does not parse: %v", err)
+	}
+	if anchor != "e2" {
+		t.Fatalf("cursor anchors on %q, want the query's last identifier e2", anchor)
 	}
 }
 

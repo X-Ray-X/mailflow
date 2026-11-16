@@ -109,10 +109,16 @@ and server-assigned — and caching one would cache an authentication result.
 ### 5. Cursor pagination by anchor
 
 Listing uses `sort: receivedAt desc`, `limit`, and a cursor built from the last
-returned message: `anchor: <vendor id>`, `anchorOffset: 1`. `calculateTotal`
-plus the returned `position` gives `position + len(ids) < total` as the
-"more messages exist" signal, so a full page that happens to be the last one
-does not advertise a cursor.
+identifier the query returned: `anchor: <vendor id>`, `anchorOffset: 1`.
+`calculateTotal` plus the returned `position` gives
+`position + len(ids) < total` as the "more messages exist" signal, so a full page
+that happens to be the last one does not advertise a cursor.
+
+The cursor anchors on the query's identifier rather than on the last message that
+could actually be fetched. If a message is deleted between the query and the
+fetch, anchoring on a fetched message could leave `hasMore` true with no cursor
+at all, which is a dead end; anchoring on the query's identifier either works or
+produces an `invalid_cursor` the client can act on.
 
 - **Alternative: `position` offsets.** Rejected: a message arriving between pages
   shifts every later offset and repeats an item, which the spec forbids.

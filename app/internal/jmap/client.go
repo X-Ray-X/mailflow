@@ -165,18 +165,24 @@ func (c *Client) Call(ctx context.Context, creds Credentials, method string, arg
 	if len(envelope.MethodResponses) != 1 {
 		return nil, fmt.Errorf("%w: %s returned %d responses", ErrUpstream, method, len(envelope.MethodResponses))
 	}
+	// A method response is a [name, arguments, clientId] triple. A short one is a
+	// malformed upstream answer, not something to index into and panic on.
+	response := envelope.MethodResponses[0]
+	if len(response) < 2 {
+		return nil, fmt.Errorf("%w: %s returned a malformed response", ErrUpstream, method)
+	}
 
 	var name string
-	if err := json.Unmarshal(envelope.MethodResponses[0][0], &name); err != nil {
+	if err := json.Unmarshal(response[0], &name); err != nil {
 		return nil, fmt.Errorf("%w: decode %s response name: %v", ErrUpstream, method, err)
 	}
 	if name == "error" {
-		return nil, methodError(envelope.MethodResponses[0][1])
+		return nil, methodError(response[1])
 	}
 	if name != method {
 		return nil, fmt.Errorf("%w: asked for %s, got %s", ErrUpstream, method, name)
 	}
-	return envelope.MethodResponses[0][1], nil
+	return response[1], nil
 }
 
 // methodError maps a JMAP method error without keeping its description.
@@ -206,6 +212,11 @@ func statusError(status int) error {
 	}
 }
 
+// maxResponseBytes bounds one upstream response. A body larger than this is
+// treated as an upstream failure rather than silently truncated into invalid
+// JSON.
+const maxResponseBytes = 8 << 20
+
 // do performs one HTTP exchange with the caller's credentials and a bounded
 // read. It classifies transport failures so callers never see raw detail.
 func (c *Client) do(ctx context.Context, creds Credentials, method string, u *url.URL, body []byte) (int, []byte, error) {
@@ -229,10 +240,14 @@ func (c *Client) do(ctx context.Context, creds Credentials, method string, u *ur
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	limited := io.LimitReader(resp.Body, 8<<20)
-	data, err := io.ReadAll(limited)
+	// Read one byte past the limit so an oversized body is detected instead of
+	// looking like a short, unparsable response.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return 0, nil, classify(err)
+	}
+	if len(data) > maxResponseBytes {
+		return 0, nil, fmt.Errorf("%w: response exceeds %d bytes", ErrUpstream, maxResponseBytes)
 	}
 	return resp.StatusCode, data, nil
 }
