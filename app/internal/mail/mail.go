@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -188,6 +187,9 @@ func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID str
 		return Page{}, ErrInvalidCursor
 	}
 
+	// Existence has to be asked for separately: this release answers a query for
+	// an unknown mailbox with an empty result, which is indistinguishable from an
+	// empty mailbox (see docs/integration-surface.md).
 	exists, err := s.upstream.MailboxExists(ctx, toJMAP(creds), account, vendorMailbox)
 	if err != nil {
 		return Page{}, mapError(err)
@@ -222,7 +224,6 @@ func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID str
 	for _, e := range fetched {
 		byID[e.ID] = e
 	}
-	var lastVendorID string
 	for _, id := range result.IDs {
 		e, ok := byID[id]
 		if !ok {
@@ -230,10 +231,14 @@ func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID str
 			continue
 		}
 		pageOut.Messages = append(pageOut.Messages, MapSummary(account, e))
-		lastVendorID = id
 	}
-	if pageOut.HasMore && lastVendorID != "" {
-		pageOut.NextCursor = ids.Cursor(account, lastVendorID)
+	// The cursor anchors on the last identifier the query returned, not the last
+	// one that could be fetched. A message deleted between the two calls would
+	// otherwise leave HasMore true with no cursor, which is a dead end for the
+	// client; anchoring on the query's identifier either works or produces an
+	// invalid_cursor the client can act on.
+	if pageOut.HasMore {
+		pageOut.NextCursor = ids.Cursor(account, result.IDs[len(result.IDs)-1])
 	}
 	return pageOut, nil
 }
@@ -296,7 +301,11 @@ func mapError(err error) error {
 	case errors.Is(err, jmap.ErrTimeout), errors.Is(err, jmap.ErrUnavailable), errors.Is(err, jmap.ErrUpstream):
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	default:
-		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+		// Not a mail server failure the adapter can classify, so it is a defect
+		// here rather than an outage. Returning it unchanged lets the HTTP layer
+		// answer 500 and log the cause, instead of telling the client to retry a
+		// request that will keep failing.
+		return err
 	}
 }
 
@@ -381,15 +390,20 @@ func textBody(e jmap.Email, maxBytes int64) (string, bool) {
 	return "", false
 }
 
-// truncateUTF8 cuts at a byte limit without leaving a partial rune.
+// truncateUTF8 cuts at a byte limit without leaving a partial rune. It slices
+// the string rather than copying it, so a large body is not duplicated just to
+// return a short prefix.
 func truncateUTF8(s string, maxBytes int64) string {
-	b := []byte(s)[:maxBytes]
-	for len(b) > 0 {
-		r, size := utf8.DecodeLastRune(b)
+	if maxBytes <= 0 || int64(len(s)) <= maxBytes {
+		return s
+	}
+	cut := int(maxBytes)
+	for cut > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:cut])
 		if r != utf8.RuneError || size > 1 {
 			break
 		}
-		b = b[:len(b)-1]
+		cut--
 	}
-	return strings.Clone(string(b))
+	return s[:cut]
 }

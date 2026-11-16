@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -314,6 +315,41 @@ func TestCallUnreachable(t *testing.T) {
 	_, err := c.Call(context.Background(), Credentials{User: "u", Password: "p"}, "Email/query", map[string]any{})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+}
+
+// A malformed upstream answer must be an error, not an index out of range.
+func TestCallRejectsShortMethodResponse(t *testing.T) {
+	srv, ca := startServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"methodResponses":[["Email/query"]]}`))
+	})
+	c := clientFor(t, srv.URL, ca.writeFile(t), 2*time.Second)
+
+	_, err := c.Call(context.Background(), Credentials{User: "u", Password: "p"}, "Email/query", map[string]any{})
+	if !errors.Is(err, ErrUpstream) {
+		t.Fatalf("error = %v, want ErrUpstream", err)
+	}
+}
+
+// A response past the bound must fail loudly rather than be read as truncated
+// JSON.
+func TestCallRejectsOversizedResponse(t *testing.T) {
+	srv, ca := startServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		for i := 0; i < 9; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+	c := clientFor(t, srv.URL, ca.writeFile(t), 10*time.Second)
+
+	_, err := c.Call(context.Background(), Credentials{User: "u", Password: "p"}, "Email/query", map[string]any{})
+	if !errors.Is(err, ErrUpstream) {
+		t.Fatalf("error = %v, want ErrUpstream", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want it to name the size bound", err)
 	}
 }
 

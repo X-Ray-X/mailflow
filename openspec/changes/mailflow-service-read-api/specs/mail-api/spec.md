@@ -46,6 +46,10 @@ Message listing SHALL be paginated with a maximum page size and SHALL report whe
 - **WHEN** a caller requests the next page of the same mailbox
 - **THEN** no message already returned on an earlier page is returned again
 
+#### Scenario: A page that reports more messages carries a cursor
+- **WHEN** a response reports that further messages exist
+- **THEN** it includes a cursor that fetches the next page, even if every message on that page was removed before it could be returned
+
 ### Requirement: Message content
 The service SHALL return one message's subject, sender, recipients, received time, read and starred state, and a text body, without exposing raw MIME or vendor properties.
 
