@@ -31,10 +31,10 @@
 
 ## 5. Integration verification
 
-- [ ] 5.1 Run the full read path against the running stack: list mailboxes, page a four-message mailbox at page size two to exhaustion, and fetch one message body, using credentials for both a normal account and a second account. Verify the transcript shows newest-first order, no repeated message across pages, a body matching the sent content, and one account unable to read the other's identifiers.
-- [ ] 5.2 Apply the `AGENTS.md` replaceability checklist to the recorded payloads: no vendor object types, method names, error codes, or IMAP vocabulary; Mailflow identifiers; no account name or domain as a key; versioned additive contract. Verify with a test or script that scans the recorded payloads for forbidden tokens and fails on a match.
-- [ ] 5.3 Exercise the mail-untouched scenario: record the mail container ids, image digests, and volume listing, then deploy, restart, and stop the application project. Verify the mail container ids, digests, and volume listing are identical afterwards and an IMAP login still succeeds.
-- [ ] 5.4 Record the verification outcome, including anything not verified and why, in the verification table in `docs/mail-infrastructure.md` and in the change's pull request description. Verify the table's "application deployment leaves mail untouched" row no longer reads as not executed, and every remaining gap names its cause.
+- [x] 5.1 Run the full read path against the running stack: list mailboxes, page a four-message mailbox at page size two to exhaustion, and fetch one message body, using credentials for both a normal account and a second account. Verify the transcript shows newest-first order, no repeated message across pages, a body matching the sent content, and one account unable to read the other's identifiers.
+- [x] 5.2 Apply the `AGENTS.md` replaceability checklist to the recorded payloads: no vendor object types, method names, error codes, or IMAP vocabulary; Mailflow identifiers; no account name or domain as a key; versioned additive contract. Verify with a test or script that scans the recorded payloads for forbidden tokens and fails on a match.
+- [x] 5.3 Exercise the mail-untouched scenario: record the mail container ids, image digests, and volume listing, then deploy, restart, and stop the application project. Verify the mail container ids, digests, and volume listing are identical afterwards and an IMAP login still succeeds.
+- [x] 5.4 Record the verification outcome, including anything not verified and why, in the verification table in `docs/mail-infrastructure.md` and in the change's pull request description. Verify the table's "application deployment leaves mail untouched" row no longer reads as not executed, and every remaining gap names its cause.
 
 ## Workflow follow-up
 

@@ -72,17 +72,33 @@ for now; connection reuse keeps it to one TLS handshake per connection.
 
 ### 3. Opaque, prefixed, reversible identifiers
 
-Identifiers are `mb1_<base64url>` for mailboxes and `msg1_<base64url>` for messages,
-encoding the vendor identifier. Clients treat them as opaque; the `1` is the encoding
-version so a future mapping table can coexist with existing identifiers.
+Identifiers are `mb1_<base64url account>.<base64url vendor>` for mailboxes,
+`msg1_…` for messages and `cur1_…` for cursors. Clients treat them as opaque; the
+`1` is the encoding version so a future mapping table can coexist with existing
+identifiers.
+
+The account is part of the identifier because the mail server assigns identifiers
+from a per-account sequence. Probing the live stack on 2026-11-16 showed alice and
+bob holding the same raw mailbox identifiers (`a`–`e`, `h`) for their own standard
+mailboxes, and the same raw message identifier for different messages. An
+identifier without its account would resolve to a different object for a different
+caller — a silent wrong answer rather than a refusal. With the account encoded, an
+identifier presented by the wrong account is refused before the mail server is
+asked.
 
 - **Alternative: raw vendor identifiers.** Rejected: leaks the vendor and breaks the
   replaceability test.
+- **Alternative: vendor identifier plus a random suffix.** Rejected: still resolves
+  against the caller's objects, so the wrong-account case would remain a silent
+  wrong answer.
 - **Alternative: ULIDs plus a mapping table.** Rejected for this change: it needs
   PostgreSQL and a reverse lookup on every request, for no user-visible benefit.
 
-The encoding is not a security boundary. The tests assert only that identifiers differ
-from vendor identifiers and are stable across requests.
+The encoding is not a security boundary. The account segment is a routing hint, not
+a capability: the mail server still decides what the caller may read, so a forged
+identifier only produces a not-found. The tests assert that identifiers differ from
+vendor identifiers, are stable across requests, and are refused when presented by
+another account.
 
 ### 4. Resolve the account from the session, never from the address
 

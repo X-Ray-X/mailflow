@@ -13,6 +13,10 @@ import (
 
 var testCreds = Credentials{User: "bob@example.test", Password: "secret"}
 
+// testAccount is the account the fake session reports, and therefore the
+// account every identifier in these tests is minted for.
+const testAccount = "acct-1"
+
 // fakeUpstream is a scripted mail server. It records what the service asked
 // for so the translation can be asserted without a network.
 type fakeUpstream struct {
@@ -94,7 +98,7 @@ func TestMapMailboxRoles(t *testing.T) {
 		"archive": "custom",
 	}
 	for vendorRole, want := range cases {
-		got := MapMailbox(jmap.Mailbox{ID: "m1", Role: vendorRole, Name: "Box"}).Role
+		got := MapMailbox(testAccount, jmap.Mailbox{ID: "m1", Role: vendorRole, Name: "Box"}).Role
 		if got != want {
 			t.Errorf("role %q mapped to %q, want %q", vendorRole, got, want)
 		}
@@ -102,15 +106,15 @@ func TestMapMailboxRoles(t *testing.T) {
 }
 
 func TestMapMailboxUsesMailflowIdentifierAndCounts(t *testing.T) {
-	got := MapMailbox(jmap.Mailbox{ID: "bmaaaaal", Name: "Inbox", Role: "inbox", UnreadEmails: 3, TotalEmails: 9})
+	got := MapMailbox(testAccount, jmap.Mailbox{ID: "bmaaaaal", Name: "Inbox", Role: "inbox", UnreadEmails: 3, TotalEmails: 9})
 	if got.ID == "bmaaaaal" {
 		t.Fatal("identifier is the mail server's")
 	}
 	if !strings.HasPrefix(got.ID, "mb1_") {
 		t.Fatalf("identifier %q lacks the mailbox prefix", got.ID)
 	}
-	if back, err := ids.ParseMailbox(got.ID); err != nil || back != "bmaaaaal" {
-		t.Fatalf("identifier does not round trip: %q %v", back, err)
+	if account, back, err := ids.ParseMailbox(got.ID); err != nil || account != testAccount || back != "bmaaaaal" {
+		t.Fatalf("identifier does not round trip: account %q object %q error %v", account, back, err)
 	}
 	if got.Unread != 3 || got.Total != 9 {
 		t.Fatalf("counts = %d/%d", got.Unread, got.Total)
@@ -119,7 +123,7 @@ func TestMapMailboxUsesMailflowIdentifierAndCounts(t *testing.T) {
 
 func TestMapSummaryTranslatesFlags(t *testing.T) {
 	received := time.Date(2026, 11, 15, 21, 0, 0, 0, time.UTC)
-	got := MapSummary(jmap.Email{
+	got := MapSummary(testAccount, jmap.Email{
 		ID:            "e1",
 		Subject:       "Hello",
 		From:          []jmap.Address{{Name: "Alice", Email: "alice@example.test"}, {Name: "Other", Email: "o@example.test"}},
@@ -145,7 +149,7 @@ func TestMapSummaryTranslatesFlags(t *testing.T) {
 }
 
 func TestMapSummaryWithoutKeywords(t *testing.T) {
-	got := MapSummary(jmap.Email{ID: "e1"})
+	got := MapSummary(testAccount, jmap.Email{ID: "e1"})
 	if got.Read || got.Starred || got.HasAttachment {
 		t.Fatalf("empty keywords produced %+v", got)
 	}
@@ -167,7 +171,7 @@ func TestMapMessageBody(t *testing.T) {
 		},
 		To: []jmap.Address{{Name: "Bob", Email: "bob@example.test"}},
 	}
-	got := MapMessage(e, 1024)
+	got := MapMessage(testAccount, e, 1024)
 	if got.Text != "hi" {
 		t.Fatalf("text = %q, want the text/plain part", got.Text)
 	}
@@ -185,7 +189,7 @@ func TestMapMessageCapsBody(t *testing.T) {
 		TextBody:   []jmap.BodyPart{{PartID: "1", Type: "text/plain"}},
 		BodyValues: map[string]jmap.BodyValue{"1": {Value: strings.Repeat("a", 100)}},
 	}
-	got := MapMessage(e, 10)
+	got := MapMessage(testAccount, e, 10)
 	if got.Text != strings.Repeat("a", 10) {
 		t.Fatalf("text length = %d, want 10", len(got.Text))
 	}
@@ -200,7 +204,7 @@ func TestMapMessageKeepsServerTruncation(t *testing.T) {
 		TextBody:   []jmap.BodyPart{{PartID: "1", Type: "text/plain"}},
 		BodyValues: map[string]jmap.BodyValue{"1": {Value: "short", IsTruncated: true}},
 	}
-	if got := MapMessage(e, 1024); !got.TextTruncated {
+	if got := MapMessage(testAccount, e, 1024); !got.TextTruncated {
 		t.Fatal("server-side truncation was dropped")
 	}
 }
@@ -208,7 +212,7 @@ func TestMapMessageKeepsServerTruncation(t *testing.T) {
 func TestMapMessageWithoutTextPart(t *testing.T) {
 	e := jmap.Email{ID: "e1", TextBody: []jmap.BodyPart{{PartID: "1", Type: "text/html"}},
 		BodyValues: map[string]jmap.BodyValue{"1": {Value: "<p>x</p>"}}}
-	got := MapMessage(e, 1024)
+	got := MapMessage(testAccount, e, 1024)
 	if got.Text != "" || got.TextTruncated {
 		t.Fatalf("got %q truncated=%v, want an empty body", got.Text, got.TextTruncated)
 	}
@@ -266,7 +270,7 @@ func TestServiceMapsTimeoutToUnavailable(t *testing.T) {
 
 func TestServiceMessagesUnknownMailbox(t *testing.T) {
 	f := &fakeUpstream{mailboxExists: false}
-	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{})
+	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
@@ -290,14 +294,14 @@ func TestServiceMessagesClampsPageSize(t *testing.T) {
 	f := &fakeUpstream{mailboxExists: true, query: jmap.QueryResult{}}
 	svc := newTestService(f)
 
-	if _, err := svc.Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{Limit: 500}); err != nil {
+	if _, err := svc.Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{Limit: 500}); err != nil {
 		t.Fatalf("Messages: %v", err)
 	}
 	if f.gotQuery.Limit != 100 {
 		t.Fatalf("limit = %d, want the maximum 100", f.gotQuery.Limit)
 	}
 
-	if _, err := svc.Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{}); err != nil {
+	if _, err := svc.Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{}); err != nil {
 		t.Fatalf("Messages: %v", err)
 	}
 	if f.gotQuery.Limit != 25 {
@@ -316,7 +320,7 @@ func TestServiceMessagesPaginates(t *testing.T) {
 	}
 	svc := newTestService(f)
 
-	page, err := svc.Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{Limit: 2})
+	page, err := svc.Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{Limit: 2})
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}
@@ -333,16 +337,19 @@ func TestServiceMessagesPaginates(t *testing.T) {
 		t.Fatalf("order = %+v, want query order", page.Messages)
 	}
 
-	anchor, err := ids.ParseCursor(page.NextCursor)
+	cursorAccount, anchor, err := ids.ParseCursor(page.NextCursor)
 	if err != nil {
 		t.Fatalf("cursor does not parse: %v", err)
+	}
+	if cursorAccount != testAccount {
+		t.Fatalf("cursor account = %q, want %q", cursorAccount, testAccount)
 	}
 	if anchor != "e2" {
 		t.Fatalf("cursor points at %q, want the last returned message e2", anchor)
 	}
 
 	f.query = jmap.QueryResult{IDs: []string{"e1"}, Total: 4, Position: 3}
-	page2, err := svc.Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{Limit: 2, Cursor: page.NextCursor})
+	page2, err := svc.Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{Limit: 2, Cursor: page.NextCursor})
 	if err != nil {
 		t.Fatalf("second page: %v", err)
 	}
@@ -359,7 +366,7 @@ func TestServiceMessagesPaginates(t *testing.T) {
 
 func TestServiceMessagesRejectsInvalidCursor(t *testing.T) {
 	f := &fakeUpstream{}
-	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{Cursor: "nonsense"})
+	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{Cursor: "nonsense"})
 	if !errors.Is(err, ErrInvalidCursor) {
 		t.Fatalf("error = %v, want ErrInvalidCursor", err)
 	}
@@ -368,10 +375,50 @@ func TestServiceMessagesRejectsInvalidCursor(t *testing.T) {
 	}
 }
 
+// The mail server reuses raw identifiers across accounts. An identifier minted
+// for another account must be refused before it can be resolved against this
+// caller's objects, which would otherwise return a different object.
+func TestServiceMessagesRejectsIdentifierFromAnotherAccount(t *testing.T) {
+	f := &fakeUpstream{mailboxExists: true}
+	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox("other-account", "m1"), PageRequest{})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.mailboxQueries != 0 {
+		t.Fatal("asked the mail server about a mailbox identifier from another account")
+	}
+	if f.queryCalls != 0 {
+		t.Fatal("queried a mailbox identifier from another account")
+	}
+}
+
+func TestServiceMessagesRejectsCursorFromAnotherAccount(t *testing.T) {
+	f := &fakeUpstream{mailboxExists: true}
+	_, err := newTestService(f).Messages(context.Background(), testCreds,
+		ids.Mailbox(testAccount, "m1"), PageRequest{Cursor: ids.Cursor("other-account", "e1")})
+	if !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("error = %v, want ErrInvalidCursor", err)
+	}
+	if f.queryCalls != 0 {
+		t.Fatal("queried with a cursor from another account")
+	}
+}
+
+func TestServiceMessageRejectsIdentifierFromAnotherAccount(t *testing.T) {
+	f := &fakeUpstream{emails: []jmap.Email{{ID: "e1"}}}
+	_, err := newTestService(f).Message(context.Background(), testCreds, ids.Message("other-account", "e1"))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.getCalls != 0 {
+		t.Fatal("asked the mail server for a message identifier from another account")
+	}
+}
+
 func TestServiceMessagesDeletedAnchor(t *testing.T) {
 	f := &fakeUpstream{mailboxExists: true, queryErr: jmap.ErrAnchorNotFound}
-	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox("m1"),
-		PageRequest{Cursor: ids.Cursor("gone")})
+	_, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"),
+		PageRequest{Cursor: ids.Cursor(testAccount, "gone")})
 	if !errors.Is(err, ErrInvalidCursor) {
 		t.Fatalf("error = %v, want ErrInvalidCursor", err)
 	}
@@ -379,7 +426,7 @@ func TestServiceMessagesDeletedAnchor(t *testing.T) {
 
 func TestServiceMessagesEmptyMailbox(t *testing.T) {
 	f := &fakeUpstream{mailboxExists: true, query: jmap.QueryResult{IDs: nil, Total: 0}}
-	page, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox("m1"), PageRequest{})
+	page, err := newTestService(f).Messages(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"), PageRequest{})
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}
@@ -400,7 +447,7 @@ func TestServiceMessageCapsAndMaps(t *testing.T) {
 	}}}
 	svc := NewService(f, 25, 100, 8)
 
-	got, err := svc.Message(context.Background(), testCreds, ids.Message("e1"))
+	got, err := svc.Message(context.Background(), testCreds, ids.Message(testAccount, "e1"))
 	if err != nil {
 		t.Fatalf("Message: %v", err)
 	}
@@ -417,7 +464,7 @@ func TestServiceMessageCapsAndMaps(t *testing.T) {
 
 func TestServiceMessageNotFound(t *testing.T) {
 	f := &fakeUpstream{emails: nil}
-	if _, err := newTestService(f).Message(context.Background(), testCreds, ids.Message("gone")); !errors.Is(err, ErrNotFound) {
+	if _, err := newTestService(f).Message(context.Background(), testCreds, ids.Message(testAccount, "gone")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 

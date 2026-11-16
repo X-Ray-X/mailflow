@@ -139,6 +139,13 @@ when `MAIL_SETUP_PORT=8080`), set `MAILFLOW_API_PORT` in `deploy/app/.env` to a
 free loopback port. The contract, configuration, and examples are in
 [`docs/api.md`](docs/api.md).
 
+```sh
+./app/scripts/verify-api.py --base http://127.0.0.1:8080
+```
+
+exercises the contract against a running instance: paging, body content,
+cross-account refusal, malformed input, and a vendor-vocabulary scan.
+
 Clients must resolve `mail.mailflow.test` to the host and trust the internal CA
 at `deploy/mail/data/tls/ca.pem`. Do not disable certificate verification.
 

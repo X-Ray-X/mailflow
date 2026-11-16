@@ -140,14 +140,14 @@ func (s *Service) Mailboxes(ctx context.Context, creds Credentials) ([]Mailbox, 
 
 	out := make([]Mailbox, 0, len(sorted))
 	for _, m := range sorted {
-		out = append(out, MapMailbox(m))
+		out = append(out, MapMailbox(account, m))
 	}
 	return out, nil
 }
 
 // Messages returns one page of a mailbox, newest first.
 func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID string, page PageRequest) (Page, error) {
-	vendorMailbox, err := ids.ParseMailbox(mailboxID)
+	mailboxAccount, vendorMailbox, err := ids.ParseMailbox(mailboxID)
 	if err != nil {
 		// A value that is not a mailbox identifier cannot name a mailbox; the
 		// caller learns nothing about whether one exists.
@@ -162,9 +162,12 @@ func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID str
 		limit = s.pageSizeMax
 	}
 
-	var anchor string
+	var (
+		anchor        string
+		cursorAccount string
+	)
 	if page.Cursor != "" {
-		anchor, err = ids.ParseCursor(page.Cursor)
+		cursorAccount, anchor, err = ids.ParseCursor(page.Cursor)
 		if err != nil {
 			return Page{}, ErrInvalidCursor
 		}
@@ -173,6 +176,16 @@ func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID str
 	account, err := s.account(ctx, creds)
 	if err != nil {
 		return Page{}, err
+	}
+
+	// The mail server reuses raw identifiers across accounts, so an identifier
+	// minted for another account must be refused here rather than resolved
+	// against this caller's objects.
+	if mailboxAccount != account {
+		return Page{}, ErrNotFound
+	}
+	if cursorAccount != "" && cursorAccount != account {
+		return Page{}, ErrInvalidCursor
 	}
 
 	exists, err := s.upstream.MailboxExists(ctx, toJMAP(creds), account, vendorMailbox)
@@ -216,18 +229,18 @@ func (s *Service) Messages(ctx context.Context, creds Credentials, mailboxID str
 			// Removed between query and fetch; skip it rather than fail.
 			continue
 		}
-		pageOut.Messages = append(pageOut.Messages, MapSummary(e))
+		pageOut.Messages = append(pageOut.Messages, MapSummary(account, e))
 		lastVendorID = id
 	}
 	if pageOut.HasMore && lastVendorID != "" {
-		pageOut.NextCursor = ids.Cursor(lastVendorID)
+		pageOut.NextCursor = ids.Cursor(account, lastVendorID)
 	}
 	return pageOut, nil
 }
 
 // Message returns one message with its text body.
 func (s *Service) Message(ctx context.Context, creds Credentials, messageID string) (Message, error) {
-	vendorMessage, err := ids.ParseMessage(messageID)
+	messageAccount, vendorMessage, err := ids.ParseMessage(messageID)
 	if err != nil {
 		return Message{}, ErrNotFound
 	}
@@ -235,6 +248,9 @@ func (s *Service) Message(ctx context.Context, creds Credentials, messageID stri
 	account, err := s.account(ctx, creds)
 	if err != nil {
 		return Message{}, err
+	}
+	if messageAccount != account {
+		return Message{}, ErrNotFound
 	}
 
 	list, err := s.upstream.GetEmails(ctx, toJMAP(creds), account, jmap.GetEmailsOptions{
@@ -248,7 +264,7 @@ func (s *Service) Message(ctx context.Context, creds Credentials, messageID stri
 	if len(list) == 0 {
 		return Message{}, ErrNotFound
 	}
-	return MapMessage(list[0], s.bodyMaxBytes), nil
+	return MapMessage(account, list[0], s.bodyMaxBytes), nil
 }
 
 // account resolves the caller's mail account from the session. It is never
@@ -285,15 +301,17 @@ func mapError(err error) error {
 }
 
 // MapMailbox translates one mailbox. Only the standard roles keep their name;
-// everything else, including a missing role, is a custom mailbox.
-func MapMailbox(m jmap.Mailbox) Mailbox {
+// everything else, including a missing role, is a custom mailbox. The account is
+// encoded into the identifier so it only resolves for the caller it was minted
+// for.
+func MapMailbox(account string, m jmap.Mailbox) Mailbox {
 	role := "custom"
 	switch m.Role {
 	case "inbox", "sent", "drafts", "trash", "junk":
 		role = m.Role
 	}
 	return Mailbox{
-		ID:     ids.Mailbox(m.ID),
+		ID:     ids.Mailbox(account, m.ID),
 		Name:   m.Name,
 		Role:   role,
 		Unread: m.UnreadEmails,
@@ -302,9 +320,9 @@ func MapMailbox(m jmap.Mailbox) Mailbox {
 }
 
 // MapSummary translates the fields a listing needs.
-func MapSummary(e jmap.Email) MessageSummary {
+func MapSummary(account string, e jmap.Email) MessageSummary {
 	return MessageSummary{
-		ID:            ids.Message(e.ID),
+		ID:            ids.Message(account, e.ID),
 		Subject:       e.Subject,
 		From:          firstAddress(e.From),
 		Received:      e.ReceivedAt,
@@ -315,10 +333,10 @@ func MapSummary(e jmap.Email) MessageSummary {
 }
 
 // MapMessage translates a message including its text body, capped at maxBytes.
-func MapMessage(e jmap.Email, maxBytes int64) Message {
+func MapMessage(account string, e jmap.Email, maxBytes int64) Message {
 	text, truncated := textBody(e, maxBytes)
 	return Message{
-		MessageSummary: MapSummary(e),
+		MessageSummary: MapSummary(account, e),
 		To:             mapAddresses(e.To),
 		Cc:             mapAddresses(e.Cc),
 		Text:           text,

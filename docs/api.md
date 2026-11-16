@@ -96,6 +96,16 @@ curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" http://127.0.0.1:8080/v1/mailbox
 
 `GET /healthz` needs no credentials.
 
+`app/scripts/verify-api.py` exercises the whole contract against a running
+instance, using the demo accounts from `deploy/mail/.env`:
+
+```sh
+./app/scripts/verify-api.py --base http://127.0.0.1:8080
+```
+
+It checks paging, body content, cross-account refusal, malformed input, and
+scans every response it receives for vendor vocabulary.
+
 ## Endpoints
 
 All responses are `application/json; charset=utf-8` and carry
@@ -108,8 +118,8 @@ Every mailbox of the caller's account.
 ```json
 {
   "mailboxes": [
-    { "id": "mb1_YQ", "name": "Inbox", "role": "inbox", "unread": 4, "total": 4 },
-    { "id": "mb1_aA", "name": "Projects", "role": "custom", "unread": 0, "total": 7 }
+    { "id": "mb1_ZA.YQ", "name": "Inbox", "role": "inbox", "unread": 4, "total": 4 },
+    { "id": "mb1_ZA.aA", "name": "Projects", "role": "custom", "unread": 0, "total": 7 }
   ]
 }
 ```
@@ -130,7 +140,7 @@ Messages in one mailbox, newest first.
 {
   "messages": [
     {
-      "id": "msg1_Z...",
+      "id": "msg1_ZA.Ym1hYWFhYWw",
       "subject": "Paging probe",
       "from": { "name": "", "email": "alice@mailflow.test" },
       "receivedAt": "2026-11-15T22:18:11Z",
@@ -139,7 +149,7 @@ Messages in one mailbox, newest first.
       "hasAttachment": false
     }
   ],
-  "nextCursor": "cur1_Y...",
+  "nextCursor": "cur1_ZA.Ym1hYWFhYWw",
   "hasMore": true
 }
 ```
@@ -155,7 +165,7 @@ One message with its text body.
 
 ```json
 {
-  "id": "msg1_Z...",
+  "id": "msg1_ZA.Ym1hYWFhYWw",
   "subject": "Paging probe",
   "from": { "name": "", "email": "alice@mailflow.test" },
   "to": [{ "name": "", "email": "bob@mailflow.test" }],
@@ -191,9 +201,14 @@ the process look unhealthy and trigger a restart.
 | `msg1_` | Message |
 | `cur1_` | Pagination cursor |
 
-They are opaque to clients: do not parse, compare, or construct them. They are
-not secrets and they are not a security boundary — the mail server decides what
-the caller may read, so a forged identifier yields `not_found`, not access.
+They are opaque to clients: do not parse, compare, or construct them. Each one
+is scoped to the account it was issued to. The mail server numbers objects per
+account, so two accounts routinely hold the same internal identifier for
+different objects; an identifier presented by the wrong account is refused with
+`not_found` (or `invalid_cursor` for a cursor) rather than resolving to whatever
+object happens to share that number. Identifiers are not secrets and are not a
+security boundary — the mail server still decides what the caller may read, so a
+forged identifier yields `not_found`, not access.
 
 ## Errors
 

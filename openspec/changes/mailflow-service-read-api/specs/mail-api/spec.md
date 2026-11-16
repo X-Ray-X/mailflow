@@ -54,11 +54,15 @@ The service SHALL return one message's subject, sender, recipients, received tim
 - **THEN** the response contains the subject, sender, recipients, received time, flags, and a text body
 
 ### Requirement: Mailflow identifiers and vocabulary
-Every public payload SHALL use Mailflow identifiers and Mailflow terms. Identifiers SHALL be opaque values that clients do not parse, and payloads SHALL NOT contain vendor object types, method names, error codes, protocol flags, or the mail server's hostname.
+Every public payload SHALL use Mailflow identifiers and Mailflow terms. Identifiers SHALL be opaque values that clients do not parse, SHALL be scoped to the account they were issued to, and payloads SHALL NOT contain vendor object types, method names, error codes, protocol flags, or the mail server's hostname.
 
 #### Scenario: Identifiers are opaque and Mailflow-owned
 - **WHEN** any response contains an identifier
 - **THEN** it is a Mailflow-prefixed value that differs from the mail server's identifier and from the account name
+
+#### Scenario: An identifier is only valid for the account it was issued to
+- **WHEN** an identifier issued to one account is presented with another account's credentials
+- **THEN** the service answers `not_found` for a mailbox or message identifier, and `invalid_cursor` for a cursor, without resolving it against the caller's own objects
 
 #### Scenario: No vendor vocabulary in a payload
 - **WHEN** any read response is inspected
