@@ -46,6 +46,17 @@ The service image SHALL run natively on arm64, the homelab architecture, without
 - **WHEN** the image built for deployment is inspected
 - **THEN** it provides a linux/arm64 variant
 
+### Requirement: Host deployment settings come from the environment
+The pipeline SHALL take host-specific deployment settings, such as the published loopback port, from the deployment environment rather than from the commit or from a file left in the checkout, and SHALL write them into the generated deployment file.
+
+#### Scenario: The published port is supplied by the environment
+- **WHEN** the workflow deploys
+- **THEN** the generated `deploy/app/.env` uses `MAILFLOW_API_PORT` from the production environment, or 8080 when it is unset
+
+#### Scenario: An occupied port fails before anything starts
+- **WHEN** another container already publishes the configured loopback port
+- **THEN** the workflow reports failure, names the variable to change, and starts no application container
+
 ### Requirement: Deployment reports a verdict
 The application pipeline SHALL reach a final verdict for every deployment, and SHALL verify after deploying that the service answers its health endpoint and that the mail infrastructure was not modified.
 

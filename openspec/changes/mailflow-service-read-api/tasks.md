@@ -35,8 +35,9 @@
 - [x] 5.2 Apply the `AGENTS.md` replaceability checklist to the recorded payloads: no vendor object types, method names, error codes, or IMAP vocabulary; Mailflow identifiers; no account name or domain as a key; versioned additive contract. Verify with a test or script that scans the recorded payloads for forbidden tokens and fails on a match.
 - [x] 5.3 Exercise the mail-untouched scenario: record the mail container ids, image digests, and volume listing, then deploy, restart, and stop the application project. Verify the mail container ids, digests, and volume listing are identical afterwards and an IMAP login still succeeds.
 - [x] 5.4 Record the verification outcome, including anything not verified and why, in the verification table in `docs/mail-infrastructure.md` and in the change's pull request description. Verify the table's "application deployment leaves mail untouched" row no longer reads as not executed, and every remaining gap names its cause.
+- [ ] 5.5 Get a passing `deploy-app.yml` run on `main` on the homelab host. Verify the run reports success, the service answers `/healthz` on its published loopback port, and the mail container id and start time are unchanged. The first run failed because an unrelated nginx container already published `127.0.0.1:8080`; the workflow now takes `MAILFLOW_API_PORT` from the production environment (`8081`) and fails early, naming it, when the port is taken.
 
 ## Workflow follow-up
 
-- Open the pull request for review; do not merge until the user asks.
-- Archive the change after the pull request is merged and the deploy run on `main` has passed.
+- [x] Open the pull request for review; merged at the user's request (`4badccf`).
+- [ ] Archive the change after the deploy run on `main` has passed.

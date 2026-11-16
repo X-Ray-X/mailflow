@@ -438,9 +438,13 @@ CA; it mounts no mail path.
 
 | Gap | Cause |
 |---|---|
-| The `deploy-app.yml` verdict on GitHub Actions | Not observable from the development machine; the workflow only runs on `main`, and its steps were instead executed in order locally (build, CA copy, deploy, health, mail-unchanged) |
-| The read contract on the homelab host | The service was verified locally; the host deploy needs the mail stack's CA copy and a free loopback port, both of which the workflow handles but which no host run has yet exercised |
+| The read contract on the homelab host | Not yet served. The first `deploy-app.yml` run on `main` (merge `4badccf`) built the image and copied the CA, then failed before the container started: `127.0.0.1:8080` is published by an unrelated nginx container on the host. The mail project's setup listener is on 8089, not 8080. The workflow now takes `MAILFLOW_API_PORT` from the production environment and fails early, naming it, when another container publishes the port. `MAILFLOW_API_PORT=8081` is set there; a passing run is still pending |
 | Mobile client against the API | Descoped by decision; there is no mobile client |
+
+The merge-triggered `deploy.yml` run on the same commit reported
+`Container mailflow-stalwart Running`; it did not recreate the mail container.
+The application run's own mail-unchanged step did not execute, because the
+deployment failed at the port before reaching it.
 
 ## Backup and restore
 
