@@ -99,12 +99,16 @@ jobs:
       - name: copy the mail CA into the application
         run: |
           set -euo pipefail
-          mkdir -p "$APP_COMPOSE_DIR/certs"
           # A copy, not a mount of the mail data directory: the two deployment
-          # units share traffic, not files. Refreshed on every deploy so a CA
-          # rotation cannot leave a stale copy behind.
-          docker cp "$MAIL_CONTAINER:/etc/stalwart/tls/ca.pem" "$APP_COMPOSE_DIR/certs/ca.pem"
-          chmod 644 "$APP_COMPOSE_DIR/certs/ca.pem"
+          # units share traffic, not files. The runner is a container, so a file
+          # it writes is not necessarily at the path the host daemon resolves;
+          # stream the CA through the daemon into an app-owned volume instead.
+          # Refilled on every deploy so a CA rotation cannot leave a stale copy.
+          docker volume create mailflow-app-ca >/dev/null
+          docker cp "$MAIL_CONTAINER:/etc/stalwart/tls/ca.pem" - \
+            | docker run --rm --user 0 -i -v mailflow-app-ca:/certs \
+                --entrypoint sh "$MAILFLOW_IMAGE" \
+                -c 'tar -xf - -C /certs && chmod 644 /certs/ca.pem'
 
       - name: record mail state before deploying
         run: |

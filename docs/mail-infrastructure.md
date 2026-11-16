@@ -438,7 +438,7 @@ CA; it mounts no mail path.
 
 | Gap | Cause |
 |---|---|
-| The read contract on the homelab host | Not yet served. The first `deploy-app.yml` run on `main` (merge `4badccf`) built the image and copied the CA, then failed before the container started: `127.0.0.1:8080` is published by an unrelated nginx container on the host. The mail project's setup listener is on 8089, not 8080. The workflow now takes `MAILFLOW_API_PORT` from the production environment and fails early, naming it, when another container publishes the port. `MAILFLOW_API_PORT=8081` is set there; a passing run is still pending |
+| The read contract on the homelab host | Not yet served. The first `deploy-app.yml` run on `main` (merge `4badccf`) failed before the container started: `127.0.0.1:8080` is published by an unrelated nginx container on the host. The mail project's setup listener is on 8089, not 8080. The workflow now takes `MAILFLOW_API_PORT` from the production environment (`8081`) and fails early, naming it, when another container publishes the port. The second run (merge `2d5e3be`) passed that check and started the container, but health failed: the CA bind mount resolved to a directory because the runner's checkout is not visible to the host Docker daemon. The CA now lives in an app-owned volume (`mailflow-app-ca`), streamed through the daemon at deploy time. A passing run is still pending |
 | Mobile client against the API | Descoped by decision; there is no mobile client |
 
 The merge-triggered `deploy.yml` run on the same commit reported
