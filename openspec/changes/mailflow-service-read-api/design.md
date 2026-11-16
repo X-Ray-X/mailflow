@@ -179,10 +179,15 @@ reach the API in this change.
   itself a container and the host's loopback is not the runner's loopback — the same
   constraint that shaped `bootstrap.sh`.
 
-The service trusts the internal CA through a copy at `deploy/app/certs/ca.pem`,
-made during deployment with `docker cp` from the mail container's
-`/etc/stalwart/tls/ca.pem`. The alternative — mounting the mail data directory
-into the application — would blur the boundary between the two deployment units.
+The service trusts the internal CA through a copy made during deployment with
+`docker cp` from the mail container's `/etc/stalwart/tls/ca.pem`. The copy lives
+in an app-owned volume (`mailflow-app-ca`) mounted read-only at `/etc/mailflow`.
+A host bind mount was the first design, but the runner is a container: a file it
+writes is not necessarily at the path the host Docker daemon resolves, so the
+mount became a directory and the service refused to start. A named volume is
+visible to the daemon by definition and needs no host-specific path. The
+alternative — mounting the mail data directory into the application — would blur
+the boundary between the two deployment units.
 
 ### 10. Build and test in the pinned Go image
 

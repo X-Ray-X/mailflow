@@ -35,9 +35,12 @@ services:
       - "127.0.0.1:${MAILFLOW_API_PORT:-8080}:8080"
 
     volumes:
-      # A copy made at deploy time from the mail container, read-only. The mail
-      # data directory is never mounted here.
-      - ./certs/ca.pem:/etc/mailflow/ca.pem:ro
+      # The mail CA, copied into an app-owned volume at deploy time and mounted
+      # read-only. A host bind mount would have to exist at the same path on the
+      # Docker host, which the runner's checkout does not: the daemon resolves
+      # bind sources on the host, not in the runner. The mail data directory is
+      # never mounted here.
+      - ca:/etc/mailflow:ro
 
     networks:
       - mail
@@ -47,6 +50,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  # App-owned, so the copy cannot be mistaken for a mail volume. Created and
+  # refilled from the mail container by the deploy before the project starts,
+  # so its lifecycle is the deploy's, not Compose's.
+  ca:
+    name: mailflow-app-ca
+    external: true
 
 networks:
   mail:

@@ -76,9 +76,12 @@ docker run -d --name mailflow-api \
 ```
 
 The CA copy is a copy, not a mount of the mail data directory: the two
-deployment units share traffic, not files. If the local mail stack already holds
-host port 8080 (its setup listener does when `MAIL_SETUP_PORT=8080`), publish the
-API on another loopback port instead.
+deployment units share traffic, not files. The deployed project puts that copy
+in an app-owned volume (`mailflow-app-ca`) instead of a host path, because the
+runner is a container and the host Docker daemon cannot see a file it writes;
+the recipe above mounts a local copy directly. If the local mail stack already
+holds host port 8080 (its setup listener does when `MAIL_SETUP_PORT=8080`),
+publish the API on another loopback port instead.
 
 On a deployed host the workflow generates `deploy/app/.env` from the example on
 every run. Set the published port as `MAILFLOW_API_PORT` in the repository's
