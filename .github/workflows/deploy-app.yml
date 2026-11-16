@@ -21,6 +21,10 @@ env:
   APP_COMPOSE_DIR: deploy/app
   MAIL_CONTAINER: mailflow-stalwart
   APP_CONTAINER: mailflow-api
+  # Published loopback port. A host property, supplied by the "production"
+  # environment like MAIL_DATA_DIR, because the checkout is cleaned on every run
+  # and cannot carry it. Empty means the tracked default, 8080.
+  MAILFLOW_API_PORT: ${{ vars.MAILFLOW_API_PORT }}
 
 jobs:
   deploy:
@@ -55,18 +59,24 @@ jobs:
         run: |
           set -euo pipefail
           cd "$APP_COMPOSE_DIR"
-          # .env is host-owned: the published port and the mail network name are
-          # properties of this host, not of the commit. Create it from the example
-          # only when absent, then rewrite the image tag. Overwriting it would
-          # discard a port chosen to avoid a collision with the mail project.
-          if [ ! -f .env ]; then
-            cp .env.example .env
+          # .env is generated, not committed: the checkout is cleaned on every
+          # run, so a file left there would not survive. The image tag comes from
+          # the build and the published port from the "production" environment;
+          # everything else keeps its tracked default.
+          cp .env.example .env
+          port="${MAILFLOW_API_PORT:-8080}"
+          case "$port" in
+            ''|*[!0-9]*)
+              echo "error: MAILFLOW_API_PORT must be a number, got '$port'" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            echo "error: MAILFLOW_API_PORT must be 1-65535, got '$port'" >&2
+            exit 1
           fi
-          if grep -q '^MAILFLOW_API_IMAGE=' .env; then
-            sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
-          else
-            printf 'MAILFLOW_API_IMAGE=%s\n' "$MAILFLOW_IMAGE" >> .env
-          fi
+          sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
+          sed -i "s|^MAILFLOW_API_PORT=.*|MAILFLOW_API_PORT=${port}|" .env
           chmod 600 .env
 
       - name: check the published port is free
@@ -81,7 +91,7 @@ jobs:
           # host binding Docker reports, not just the loopback one.
           if docker ps --format '{{.Ports}}' | grep -Eq "(^|[ ,])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->"; then
             echo "error: 127.0.0.1:${port} is already published by another container" >&2
-            echo "set MAILFLOW_API_PORT in ${APP_COMPOSE_DIR}/.env to a free loopback port" >&2
+            echo "set MAILFLOW_API_PORT in the production environment to a free loopback port" >&2
             docker ps --format '{{.Names}} {{.Ports}}' >&2
             exit 1
           fi
