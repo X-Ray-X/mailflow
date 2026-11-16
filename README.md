@@ -134,9 +134,10 @@ docker compose up -d
 | Mailflow API, loopback only | `http://127.0.0.1:8080/v1/` |
 | Health | `http://127.0.0.1:8080/healthz` |
 
-If the local mail stack already holds host port 8080 (its setup listener does
-when `MAIL_SETUP_PORT=8080`), set `MAILFLOW_API_PORT` in `deploy/app/.env` to a
-free loopback port. The contract, configuration, and examples are in
+If host port 8080 is already taken, set `MAILFLOW_API_PORT` in the repository's
+`production` environment to a free loopback port. The deploy workflow generates
+`deploy/app/.env` from the example on every run, so a value edited in the
+checkout would not survive. The contract, configuration, and examples are in
 [`docs/api.md`](docs/api.md).
 
 ```sh
