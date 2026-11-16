@@ -154,10 +154,12 @@ Messages in one mailbox, newest first.
 }
 ```
 
-`hasMore` is always present. `nextCursor` appears only when `hasMore` is true;
+`hasMore` is always present. `nextCursor` appears whenever `hasMore` is true;
 a request that omits `cursor` starts at the newest message. Following a cursor
 never repeats a message already returned, because the cursor anchors the next
-page after the last message the caller saw.
+page after the last message the page ended on. If that message is removed before
+the next request, the cursor answers `invalid_cursor`; restart from the first
+page rather than skipping mail.
 
 ### `GET /v1/messages/{messageID}`
 
