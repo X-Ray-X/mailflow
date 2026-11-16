@@ -26,10 +26,15 @@ Basic authentication was confirmed for three identities: `admin@mailflow.test`
 `username` that authenticated.
 
 The JMAP hostname must be the certificate's name. The stack publishes `443` on
-loopback only, so a process on the host — the future Go service — reaches it at
-`https://127.0.0.1:443` while presenting `mail.mailflow.test` as the TLS server
-name, or after `mail.mailflow.test` is resolvable to `127.0.0.1`. There is no
-plaintext management port once the server is configured; `8089` remains an
+loopback only, so a process on the host reaches it at `https://127.0.0.1:443`
+while presenting `mail.mailflow.test` as the TLS server name, or after
+`mail.mailflow.test` is resolvable to `127.0.0.1`. A container instead joins the
+mail project's network (`mailflow-mail_default`) and dials
+`https://mailflow-stalwart/`, still presenting `mail.mailflow.test` as the TLS
+server name. That path was exercised on 2026-11-15 from inside the mail container
+with `curl --resolve mail.mailflow.test:443:<mail container ip>` and the
+configured CA: the session returned `200` with a verified certificate. There is
+no plaintext management port once the server is configured; `8089` remains an
 unauthenticated health/setup listener.
 
 ## Session document
@@ -153,6 +158,67 @@ IMAP, in JMAP vocabulary. The Mailflow model must map these to its own terms
 
 The same data was independently visible over IMAP, including flags set by
 another client, so the two protocols read one store.
+
+### Paging, bodies and unknown identifiers (probed 2026-11-15)
+
+Exercised against the same stack, with four messages in one mailbox and a page
+size of two:
+
+- **Paging works as the adapter needs it.** `Email/query` with
+  `sort: [{property: "receivedAt", isAscending: false}]`, `limit: 2` and
+  `calculateTotal: true` returned two ids with `total: 4` and `position: 0`. A
+  second call with `anchor: <last id of page one>` and `anchorOffset: 1`
+  returned the next two ids with `position: 2`, repeating nothing. A third call
+  returned an empty `ids` list with `position: 4`. `position + len(ids) < total`
+  is therefore a reliable "more messages exist" signal, so a page size need not
+  be guessed from a short page.
+- **An unknown anchor is an error, not a silent restart.** The server answered
+  the method call with `{"type":"anchorNotFound","description":...}`. The adapter
+  can turn that into its own invalid-cursor error instead of skipping mail.
+- **An unknown mailbox id is not an error.** `Email/query` with
+  `filter.inMailbox` set to an id that does not exist returned an empty `ids`
+  list, so existence has to be asked for with `Mailbox/get` and its `notFound`.
+- **An unknown message id is reported, not invented.** `Email/get` with an id
+  that does not exist returned `list: []` and `notFound: ["..."]`.
+- **Body values must be requested by name.** With an explicit `properties` list
+  that omitted `bodyValues`, `Email/get` returned no bodies even with
+  `fetchTextBodyValues: true`. Naming `bodyValues` in `properties` returned
+  `bodyValues` keyed by part id. The default property set (when `properties` is
+  omitted) includes bodies, but also `blobId`, `threadId`, `messageId`, and
+  other vendor detail, which is why the adapter always sends an explicit list.
+- **`maxBodyValueBytes` is honoured.** Setting it to 8 returned a shortened
+  value with `isTruncated: true`.
+- **Observed roles** are `inbox`, `sent`, `drafts`, `trash`, `junk`, and `none`
+  for a mailbox created without a role. There is no `archive` role in the
+  default set.
+- **`Email/get` returned messages in the order of the requested ids** in this
+  observation. The adapter still reorders by the query result rather than
+  relying on it.
+
+### Identifiers are per-account, not global (probed 2026-11-16)
+
+Raw identifiers are short sequences assigned independently per account, so the
+same identifier names different objects in different accounts. Observed on the
+same stack:
+
+- alice and bob each held mailboxes `a`, `b`, `c`, `d`, `e`, and `h` for their
+  own standard mailboxes. Alice's sent mailbox `e` is not bob's sent mailbox `e`.
+- In the scoping probe, alice's private message `2aaaaah` and bob's inbox message
+  `2aaaaah` were different messages with different subjects. Bob's request for
+  alice's identifier returned *his own* message rather than an error.
+- `Mailbox/get` with another account's mailbox identifier returns this account's
+  object with that identifier, not an error; `Email/query` with a foreign mailbox
+  identifier returns empty `ids`; `Email/get` with a foreign message identifier
+  returns this account's object when one exists with that identifier.
+- A mailbox identifier that exists only in alice's account (`i`–`o` after
+  creating seven extra mailboxes) returned `notFound` for bob, and a message
+  identifier unique to alice likewise returned nothing for bob.
+
+Consequences for the service: an identifier must carry the account it was issued
+to, otherwise the same identifier would mean different things to different
+callers. The service refuses a foreign identifier locally, before asking the
+mail server. This is a wrong-answer problem, not a confidentiality problem: no
+probe made another account's content readable.
 
 ## Push notifications
 

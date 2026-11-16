@@ -1,6 +1,10 @@
 # Local deployment state and secrets
 deploy/mail/.env
 deploy/mail/data/
+# The application's CA copy is made at deploy time; the mail data directory is
+# never mounted or tracked from here.
+deploy/app/certs/
+deploy/app/.env
 
 # Tooling noise
 .DS_Store

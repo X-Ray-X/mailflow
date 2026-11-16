@@ -1,0 +1,54 @@
+name: mailflow-app
+
+# The application deployment unit. It is a Compose project of its own so that
+# deploying, restarting, or rolling it back can never recreate, upgrade, or
+# reset the mail infrastructure. See
+# openspec/changes/mailflow-service-read-api/design.md.
+#
+# It joins the mail project's network because a container cannot reach the
+# host's loopback, where the mail HTTPS listener is published. It shares no
+# container, volume, or configuration file with the mail project.
+
+services:
+  api:
+    image: ${MAILFLOW_API_IMAGE:?MAILFLOW_API_IMAGE must be set}
+    container_name: mailflow-api
+    init: true
+    restart: unless-stopped
+
+    environment:
+      # Inside the network the mail container is the address; the certificate
+      # is still issued for the mail hostname, so both are configured.
+      MAILFLOW_JMAP_URL: ${MAILFLOW_JMAP_URL:-https://mailflow-stalwart/jmap/}
+      MAILFLOW_JMAP_HOSTNAME: ${MAILFLOW_JMAP_HOSTNAME:-mail.mailflow.test}
+      MAILFLOW_CA_FILE: /etc/mailflow/ca.pem
+      # Docker publishes to the container's address, not its loopback.
+      MAILFLOW_LISTEN_ADDR: 0.0.0.0:8080
+      MAILFLOW_REQUEST_TIMEOUT: ${MAILFLOW_REQUEST_TIMEOUT:-10s}
+      MAILFLOW_PAGE_SIZE_DEFAULT: ${MAILFLOW_PAGE_SIZE_DEFAULT:-25}
+      MAILFLOW_PAGE_SIZE_MAX: ${MAILFLOW_PAGE_SIZE_MAX:-100}
+      MAILFLOW_BODY_MAX_BYTES: ${MAILFLOW_BODY_MAX_BYTES:-262144}
+
+    ports:
+      # Host loopback only. Widening this belongs to the change that adds a
+      # consumer, not to this one.
+      - "127.0.0.1:${MAILFLOW_API_PORT:-8080}:8080"
+
+    volumes:
+      # A copy made at deploy time from the mail container, read-only. The mail
+      # data directory is never mounted here.
+      - ./certs/ca.pem:/etc/mailflow/ca.pem:ro
+
+    networks:
+      - mail
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  mail:
+    external: true
+    name: ${MAILFLOW_MAIL_NETWORK:-mailflow-mail_default}

@@ -4,15 +4,16 @@ Mailflow service architecture challenge designed to showcase Spec-Driven Develop
 
 ## Continuous delivery
 
-The mail infrastructure is deployed from this repository on the homelab host.
+Both deployment units are deployed from this repository on the homelab host.
 A self-hosted GitHub Actions runner on the host runs the pipelines below.
 
 ### Workflows
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | pull request / manual | structural gate for `deploy/mail/compose.yaml` |
-| `deploy.yml` | push to `main` / manual | deploy on the host, then verify ports and tailnet TLS |
+| `ci.yml` | pull request / manual | structural gate for both Compose projects |
+| `deploy.yml` | push to `main` / manual | deploy the mail infrastructure, then verify ports and tailnet TLS |
+| `deploy-app.yml` | push to `main` / manual | build the service image on the host, deploy the application project, verify health and that mail was untouched |
 | `pr-agent.yml` | pull request / comment | PR-Agent review / describe / improve (advisory, never blocks) |
 
 ### Runner
@@ -34,11 +35,26 @@ Both demo accounts (`alice`/`bob`) exist so mail can be sent between local
 accounts and exercised against the mailbox-access specs; they are also the
 homelab's public demo accounts.
 
+The same environment also holds two variables, used by the mail deploy:
+
+| Variable | Purpose |
+|---|---|
+| `MAIL_DATA_DIR` | absolute host path for the mail data directory |
+| `MAIL_TAILNET_IP` | optional host tailnet address, printed in the run summary |
+
+The application deploy needs no secret: it builds its image on the host and
+tags it by commit.
+
 ### Verify after a deployment
 
 Run `deploy/mail/scripts/verify.sh` on the host. It is the authority for the
 mailbox-access and persistence specs; the pipeline only covers structural
 checks plus the tailnet certificate SAN assertion.
+
+After an application deploy, the pipeline asserts the service reports healthy
+and that the mail container's identity and start time did not change. The read
+contract itself is exercised with the requests in
+[`docs/api.md`](docs/api.md).
 
 ### PR-Agent (no subscription)
 
@@ -63,12 +79,15 @@ of the project is the service boundary — the mail server is replaceable, and
 application deployments never recreate, upgrade, or reset mail infrastructure.
 
 Current state: the mail infrastructure is deployed and verified. The Go service
-does not exist yet.
+publishes the read contract (mailboxes, message list, message content); sending
+and flag changes are the next change.
 
 ## Layout
 
 ```
+app/                Go service: read contract, mail adapter, tests
 deploy/mail/        mail infrastructure Compose project (Stalwart, pinned)
+deploy/app/         application Compose project (service only)
 docs/               operational and integration documentation
 openspec/specs/     current behavior, authoritative
 openspec/changes/   work in flight, with tasks and design
@@ -77,6 +96,8 @@ openspec/changes/   work in flight, with tasks and design
 ## Quickstart
 
 Requires Docker with the Compose plugin, plus `curl`, `openssl`, and `python3`.
+
+### Mail infrastructure
 
 ```sh
 cd deploy/mail
@@ -93,11 +114,44 @@ A working stack then offers:
 | Submission (implicit TLS) | `mail.mailflow.test:465` |
 | JMAP / management, loopback only | `https://127.0.0.1:443/jmap/` |
 
+### Application
+
+The service needs the mail stack running first. It joins the mail project's
+network because a container cannot reach the host's loopback.
+
+```sh
+docker buildx build --platform linux/arm64 -t mailflow-api:dev app/
+mkdir -p deploy/app/certs
+docker cp mailflow-stalwart:/etc/stalwart/tls/ca.pem deploy/app/certs/ca.pem
+
+cd deploy/app
+cp .env.example .env
+docker compose up -d
+```
+
+| Service | Address |
+|---|---|
+| Mailflow API, loopback only | `http://127.0.0.1:8080/v1/` |
+| Health | `http://127.0.0.1:8080/healthz` |
+
+If the local mail stack already holds host port 8080 (its setup listener does
+when `MAIL_SETUP_PORT=8080`), set `MAILFLOW_API_PORT` in `deploy/app/.env` to a
+free loopback port. The contract, configuration, and examples are in
+[`docs/api.md`](docs/api.md).
+
+```sh
+./app/scripts/verify-api.py --base http://127.0.0.1:8080
+```
+
+exercises the contract against a running instance: paging, body content,
+cross-account refusal, malformed input, and a vendor-vocabulary scan.
+
 Clients must resolve `mail.mailflow.test` to the host and trust the internal CA
 at `deploy/mail/data/tls/ca.pem`. Do not disable certificate verification.
 
 - Day-to-day operation, TLS, backup/restore, upgrade: [`docs/mail-infrastructure.md`](docs/mail-infrastructure.md)
 - Observed JMAP surface, capabilities, events: [`docs/integration-surface.md`](docs/integration-surface.md)
+- Published read contract, configuration, run recipe: [`docs/api.md`](docs/api.md)
 
 ## Specifications
 

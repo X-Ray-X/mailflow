@@ -363,6 +363,19 @@ Last run: **37/37 checks passed** from a stopped stack on the local OrbStack sta
 on the deployed host, but its last host run predates the mailbox-rename and
 no-egress checks.
 
+The application's read contract has its own check, run against a live API:
+
+```sh
+./app/scripts/verify-api.py --base http://127.0.0.1:8080
+```
+
+It lists mailboxes for two accounts, pages a mailbox at size two to exhaustion,
+fetches a body, and asserts that neither account can use the other's mailbox,
+message, or cursor identifiers — including the case where the mail server's
+internal identifier is identical in both accounts. It also scans every response
+it received for vendor vocabulary. It is not part of `verify.sh`, because the
+application is a separate deployment unit.
+
 ### Spec scenario coverage
 
 Status of every scenario in the change's two specs. "Protocol client" means the
@@ -384,7 +397,7 @@ protocols. Desktop results are from Thunderbird on macOS.
 | mail-infrastructure | Advertised hostname matches the certificate | PASS — SANs match the documented names |
 | mail-infrastructure | Port inventory matches documentation | PASS |
 | mail-infrastructure | Unauthenticated submission is refused | PASS — `503 5.5.1` |
-| mail-infrastructure | Application deployment leaves mail untouched | NOT EXECUTED — no application stack exists yet; the boundary is a separate Compose project and the app-stack change owns this scenario |
+| mail-infrastructure | Application deployment leaves mail untouched | PASS — see the row notes below |
 | mail-infrastructure | Runs on the target host | PASS — deployed on the arm64 host with the native image |
 | mailbox-access | Client completes account setup | PASS — protocol client and Thunderbird (macOS) |
 | mailbox-access | Sending succeeds | PASS — protocol client and Thunderbird (macOS) |
@@ -400,6 +413,34 @@ protocols. Desktop results are from Thunderbird on macOS.
 | mailbox-access | Desktop application works | PASS — Thunderbird (macOS), both accounts, delivery confirmed |
 | mailbox-access | A second implementation reads the same account | PASS — Thunderbird and the protocol client both list the standard mailboxes |
 | mailbox-access | Mobile guidance exists | PASS — documented; no mobile client configured, by decision |
+
+### Application deployment leaves mail untouched
+
+Exercised on 2026-11-16 against the local OrbStack stack with the application
+Compose project from `deploy/app/`. The mail container's identity, start time,
+image digest, and bind mounts were recorded, then the application project was
+deployed (`up -d --force-recreate`), restarted, stopped, and started again.
+
+| Observation | Before | After deploy | After restart | After stop | After start |
+|---|---|---|---|---|---|
+| Container id | `f8a76c1e131e` | same | same | same | same |
+| Started at | `2026-11-15T21:58:35Z` | same | same | same | same |
+| Image digest | `sha256:f772aa6e…` | same | same | same | same |
+| Bind mounts | `etc`, `lib`, `tls` | same | same | same | same |
+| Named volumes | none | none | none | none | none |
+| IMAP login + `SELECT INBOX` | OK, 4 messages | OK, 4 | OK, 4 | OK, 4 | OK, 4 |
+
+An application deploy therefore neither recreates the mail container nor touches
+its data. The application project shares only the mail network and a copy of the
+CA; it mounts no mail path.
+
+### Remaining verification gaps
+
+| Gap | Cause |
+|---|---|
+| The `deploy-app.yml` verdict on GitHub Actions | Not observable from the development machine; the workflow only runs on `main`, and its steps were instead executed in order locally (build, CA copy, deploy, health, mail-unchanged) |
+| The read contract on the homelab host | The service was verified locally; the host deploy needs the mail stack's CA copy and a free loopback port, both of which the workflow handles but which no host run has yet exercised |
+| Mobile client against the API | Descoped by decision; there is no mobile client |
 
 ## Backup and restore
 

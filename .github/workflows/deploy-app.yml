@@ -1,0 +1,122 @@
+name: Deploy application
+
+# The application deployment unit. It never references the mail project's
+# containers, volumes, or configuration: an application deploy cannot recreate,
+# upgrade, or reset the mail infrastructure. See
+# openspec/changes/mailflow-service-read-api/design.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_COMPOSE_DIR: deploy/app
+  MAIL_CONTAINER: mailflow-stalwart
+  APP_CONTAINER: mailflow-api
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, radxa]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: checkout mailflow
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: require the mail stack
+        run: |
+          set -euo pipefail
+          # The application is a client of the mail infrastructure. Failing here
+          # is clearer than starting a service that cannot reach anything.
+          docker inspect "$MAIL_CONTAINER" >/dev/null 2>&1 \
+            || { echo "error: $MAIL_CONTAINER is not running; deploy the mail infrastructure first" >&2; exit 1; }
+
+      - name: build the image for this commit
+        run: |
+          set -euo pipefail
+          # Built on the host and tagged by commit. The runner drives the host's
+          # Docker daemon, so this image is the one the application runs, and an
+          # older commit's tag remains available for rollback.
+          image="mailflow-api:${GITHUB_SHA::12}"
+          docker build --platform linux/arm64 -t "$image" app/
+          echo "MAILFLOW_IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: prepare the deploy environment
+        run: |
+          set -euo pipefail
+          cd "$APP_COMPOSE_DIR"
+          # .env.example holds names and examples only. The image tag comes from
+          # the build step; everything else keeps its tracked default.
+          cp .env.example .env
+          sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
+          chmod 600 .env
+
+      - name: copy the mail CA into the application
+        run: |
+          set -euo pipefail
+          mkdir -p "$APP_COMPOSE_DIR/certs"
+          # A copy, not a mount of the mail data directory: the two deployment
+          # units share traffic, not files. Refreshed on every deploy so a CA
+          # rotation cannot leave a stale copy behind.
+          docker cp "$MAIL_CONTAINER:/etc/stalwart/tls/ca.pem" "$APP_COMPOSE_DIR/certs/ca.pem"
+          chmod 644 "$APP_COMPOSE_DIR/certs/ca.pem"
+
+      - name: record mail state before deploying
+        run: |
+          set -euo pipefail
+          docker inspect "$MAIL_CONTAINER" --format '{{.Id}} {{.State.StartedAt}} {{.Image}}' \
+            | tee "$RUNNER_TEMP/mail-before.txt"
+
+      - name: deploy the application
+        run: |
+          set -euo pipefail
+          cd "$APP_COMPOSE_DIR"
+          docker compose -f compose.yaml up -d --remove-orphans
+
+      - name: wait for health
+        run: |
+          set -euo pipefail
+          # The runner is a container, so its loopback is not the host's. Ask
+          # Docker for the container's own health state instead of curling.
+          for _ in $(seq 1 30); do
+            status="$(docker inspect "$APP_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
+            if [ "$status" = "healthy" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "error: $APP_CONTAINER did not become healthy" >&2
+          docker logs --tail 50 "$APP_CONTAINER" >&2 || true
+          exit 1
+
+      - name: verify the mail infrastructure was not modified
+        run: |
+          set -euo pipefail
+          before="$(cat "$RUNNER_TEMP/mail-before.txt")"
+          after="$(docker inspect "$MAIL_CONTAINER" --format '{{.Id}} {{.State.StartedAt}} {{.Image}}')"
+          test "$after" = "$before" \
+            || { echo "error: the mail container changed during an application deploy" >&2
+                 echo "before: $before" >&2
+                 echo "after:  $after" >&2
+                 exit 1; }
+          docker compose -p mailflow-mail ps --format '{{.Name}} {{.Status}}'
+
+      - name: write run summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
+          Application deployed from ${{ github.sha }}
+          Image: ${MAILFLOW_IMAGE} (built on the host, arm64)
+          Health: healthy
+          API: 127.0.0.1:${MAILFLOW_API_PORT:-8080} (host loopback)
+          Mail: unchanged — $(cat "$RUNNER_TEMP/mail-before.txt")
+          EOF
