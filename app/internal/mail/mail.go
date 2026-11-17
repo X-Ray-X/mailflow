@@ -11,7 +11,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -25,6 +27,19 @@ var (
 	ErrInvalidCursor = errors.New("invalid cursor")
 	ErrUnauthorized  = errors.New("authentication required")
 	ErrUnavailable   = errors.New("mail service unavailable")
+	// ErrRejected means the mail server declined the message itself: a bad
+	// recipient, a sender it will not accept, or a message it refuses. Retrying
+	// the same input cannot succeed, which is why it is separate from an outage.
+	ErrRejected = errors.New("mail server declined the message")
+	// ErrConflict means an idempotency key was reused for a different request.
+	ErrConflict = errors.New("idempotency key reused for a different request")
+	// ErrInProgress means a duplicate arrived while the first attempt is still
+	// being processed.
+	ErrInProgress = errors.New("a send with this idempotency key is in progress")
+	// ErrInvalidInput means the request is well-formed HTTP but cannot be
+	// honoured for this account, such as a recipient outside the local mail
+	// domain. Nothing was submitted.
+	ErrInvalidInput = errors.New("request is not valid for this account")
 )
 
 // Credentials are forwarded to the mail server on every request and never
@@ -83,11 +98,35 @@ type Page struct {
 	HasMore    bool
 }
 
-// Reader is what the HTTP layer depends on.
+// Reader is the read side of the HTTP contract.
 type Reader interface {
 	Mailboxes(ctx context.Context, creds Credentials) ([]Mailbox, error)
 	Messages(ctx context.Context, creds Credentials, mailboxID string, page PageRequest) (Page, error)
 	Message(ctx context.Context, creds Credentials, messageID string) (Message, error)
+}
+
+// OutgoingMessage is a validated message to send. It has no sender field: the
+// sender is always the authenticated account's identity.
+type OutgoingMessage struct {
+	To      []Address
+	Cc      []Address
+	Subject string
+	Text    string
+}
+
+// FlagPatch is a desired-state flag update. A nil field is left unchanged, so
+// repeating a patch changes nothing.
+type FlagPatch struct {
+	Read    *bool
+	Starred *bool
+}
+
+// Writer is the write side of the HTTP contract.
+type Writer interface {
+	// Send returns the Mailflow identifier of the sent message.
+	Send(ctx context.Context, creds Credentials, msg OutgoingMessage) (string, error)
+	// SetFlags applies the patch and returns the message's new summary.
+	SetFlags(ctx context.Context, creds Credentials, messageID string, patch FlagPatch) (MessageSummary, error)
 }
 
 // upstream is the part of the JMAP client the service uses. It is an interface
@@ -98,23 +137,32 @@ type upstream interface {
 	MailboxExists(ctx context.Context, creds jmap.Credentials, accountID, mailboxID string) (bool, error)
 	QueryEmails(ctx context.Context, creds jmap.Credentials, accountID string, q jmap.Query) (jmap.QueryResult, error)
 	GetEmails(ctx context.Context, creds jmap.Credentials, accountID string, opts jmap.GetEmailsOptions) ([]jmap.Email, error)
+	Identities(ctx context.Context, creds jmap.Credentials, accountID string) ([]jmap.Identity, error)
+	SendMessage(ctx context.Context, creds jmap.Credentials, accountID string, msg jmap.OutgoingEmail) (string, error)
+	DestroyEmails(ctx context.Context, creds jmap.Credentials, accountID string, ids ...string) error
+	SetEmailKeywords(ctx context.Context, creds jmap.Credentials, accountID, emailID string, read, starred *bool) error
 }
 
-// Service adapts the mail server to the Reader contract.
+// Service adapts the mail server to the Reader and Writer contracts.
 type Service struct {
 	upstream        upstream
 	pageSizeDefault int
 	pageSizeMax     int
 	bodyMaxBytes    int64
+	log             *slog.Logger
 }
 
 // NewService wires the adapter with the configured bounds.
-func NewService(client upstream, pageSizeDefault, pageSizeMax int, bodyMaxBytes int64) *Service {
+func NewService(client upstream, pageSizeDefault, pageSizeMax int, bodyMaxBytes int64, log *slog.Logger) *Service {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Service{
 		upstream:        client,
 		pageSizeDefault: pageSizeDefault,
 		pageSizeMax:     pageSizeMax,
 		bodyMaxBytes:    bodyMaxBytes,
+		log:             log,
 	}
 }
 
@@ -272,6 +320,162 @@ func (s *Service) Message(ctx context.Context, creds Credentials, messageID stri
 	return MapMessage(account, list[0], s.bodyMaxBytes), nil
 }
 
+// Send submits a plain-text message as the caller. The sender comes from the
+// account's identity, never from the request. Recipients are restricted to the
+// identity's domain, which is what keeps the service from becoming a relay.
+func (s *Service) Send(ctx context.Context, creds Credentials, msg OutgoingMessage) (string, error) {
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+
+	identities, err := s.upstream.Identities(ctx, toJMAP(creds), account)
+	if err != nil {
+		return "", mapError(err)
+	}
+	identity, ok := chooseIdentity(identities, creds.User)
+	if !ok {
+		// A permanent condition for this account, not an outage.
+		return "", fmt.Errorf("%w: the account has no sending identity", ErrRejected)
+	}
+
+	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
+	if err != nil {
+		return "", mapError(err)
+	}
+	var drafts, sent string
+	for _, box := range boxes {
+		switch box.Role {
+		case "drafts":
+			drafts = box.ID
+		case "sent":
+			sent = box.ID
+		}
+	}
+	if drafts == "" || sent == "" {
+		return "", fmt.Errorf("%w: the account has no drafts or sent mailbox", ErrUnavailable)
+	}
+
+	domain := addressDomain(identity.Email)
+	if domain == "" {
+		domain = addressDomain(creds.User)
+	}
+	if domain == "" {
+		return "", fmt.Errorf("%w: the account has no usable mail domain", ErrRejected)
+	}
+	for _, recipient := range append(append([]Address{}, msg.To...), msg.Cc...) {
+		if !strings.EqualFold(addressDomain(recipient.Email), domain) {
+			return "", fmt.Errorf("%w: a recipient is outside the local mail domain", ErrInvalidInput)
+		}
+	}
+
+	// The pinned release names the identity after its address. A display name
+	// equal to the address is noise, so it is omitted rather than duplicated.
+	from := jmap.Address{Email: identity.Email}
+	if identity.Name != "" && !strings.EqualFold(identity.Name, identity.Email) {
+		from.Name = identity.Name
+	}
+
+	vendorID, err := s.upstream.SendMessage(ctx, toJMAP(creds), account, jmap.OutgoingEmail{
+		DraftsMailboxID: drafts,
+		SentMailboxID:   sent,
+		IdentityID:      identity.ID,
+		From:            from,
+		To:              toJMAPAddresses(msg.To),
+		Cc:              toJMAPAddresses(msg.Cc),
+		Subject:         msg.Subject,
+		Text:            msg.Text,
+	})
+	if err != nil {
+		// SendMessage returns the created identifier when the message was made
+		// but not submitted. Remove that draft; if the removal fails, the draft
+		// stays visible and is logged rather than silently lost.
+		if vendorID != "" {
+			if destroyErr := s.upstream.DestroyEmails(ctx, toJMAP(creds), account, vendorID); destroyErr != nil {
+				s.log.Warn("could not remove a draft whose submission failed", "error", destroyErr)
+			}
+		}
+		return "", mapError(err)
+	}
+	return ids.Message(account, vendorID), nil
+}
+
+// SetFlags sets the stated flags and returns the updated summary. It patches
+// only the named keywords, so other attributes survive.
+func (s *Service) SetFlags(ctx context.Context, creds Credentials, messageID string, patch FlagPatch) (MessageSummary, error) {
+	messageAccount, vendorMessage, err := ids.ParseMessage(messageID)
+	if err != nil {
+		return MessageSummary{}, ErrNotFound
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return MessageSummary{}, err
+	}
+	if messageAccount != account {
+		return MessageSummary{}, ErrNotFound
+	}
+
+	if err := s.upstream.SetEmailKeywords(ctx, toJMAP(creds), account, vendorMessage, patch.Read, patch.Starred); err != nil {
+		return MessageSummary{}, mapError(err)
+	}
+
+	list, err := s.upstream.GetEmails(ctx, toJMAP(creds), account, jmap.GetEmailsOptions{IDs: []string{vendorMessage}})
+	if err != nil {
+		return MessageSummary{}, mapError(err)
+	}
+	if len(list) == 0 {
+		return MessageSummary{}, ErrNotFound
+	}
+	return MapSummary(account, list[0]), nil
+}
+
+// chooseIdentity picks the identity that belongs to the authenticated user.
+// An exact address match wins; a bare username matches an identity's local
+// part; a sole identity is the fallback the pinned release needs. The caller
+// can never name a different identity.
+func chooseIdentity(identities []jmap.Identity, user string) (jmap.Identity, bool) {
+	for _, identity := range identities {
+		if identity.ID != "" && strings.EqualFold(identity.Email, user) {
+			return identity, true
+		}
+	}
+	local := user
+	if at := strings.LastIndex(user, "@"); at > 0 {
+		local = user[:at]
+	}
+	for _, identity := range identities {
+		if identity.ID == "" || identity.Email == "" {
+			continue
+		}
+		identityLocal := identity.Email
+		if at := strings.LastIndex(identity.Email, "@"); at > 0 {
+			identityLocal = identity.Email[:at]
+		}
+		if strings.EqualFold(identityLocal, local) {
+			return identity, true
+		}
+	}
+	if len(identities) == 1 && identities[0].ID != "" {
+		return identities[0], true
+	}
+	return jmap.Identity{}, false
+}
+
+// addressDomain returns the lowercased domain of an address, or "" when the
+// value is not a usable address.
+func addressDomain(email string) string {
+	email = strings.TrimSpace(email)
+	at := strings.LastIndex(email, "@")
+	if at <= 0 || at == len(email)-1 {
+		return ""
+	}
+	if strings.ContainsAny(email, " \t\r\n<>") {
+		return ""
+	}
+	return strings.ToLower(email[at+1:])
+}
+
 // account resolves the caller's mail account from the session. It is never
 // derived from a request parameter.
 func (s *Service) account(ctx context.Context, creds Credentials) (string, error) {
@@ -290,14 +494,29 @@ func toJMAP(creds Credentials) jmap.Credentials {
 	return jmap.Credentials{User: creds.User, Password: creds.Password}
 }
 
+func toJMAPAddresses(list []Address) []jmap.Address {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]jmap.Address, 0, len(list))
+	for _, a := range list {
+		out = append(out, jmap.Address{Name: a.Name, Email: a.Email})
+	}
+	return out
+}
+
 // mapError converts one failure class into another, keeping the cause for logs
 // and giving the HTTP layer a stable class to map to a status and message.
 func mapError(err error) error {
 	switch {
 	case errors.Is(err, jmap.ErrUnauthorized):
 		return ErrUnauthorized
+	case errors.Is(err, jmap.ErrNotFound):
+		return ErrNotFound
 	case errors.Is(err, jmap.ErrAnchorNotFound):
 		return ErrInvalidCursor
+	case errors.Is(err, jmap.ErrRejected):
+		return fmt.Errorf("%w: %v", ErrRejected, err)
 	case errors.Is(err, jmap.ErrTimeout), errors.Is(err, jmap.ErrUnavailable), errors.Is(err, jmap.ErrUpstream):
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	default:

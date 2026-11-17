@@ -4,8 +4,9 @@ The Go service that publishes Mailflow's HTTP contract. It adapts to the mail
 server through JMAP and translates the result into Mailflow identifiers and
 vocabulary; nothing in a response is vendor-shaped.
 
-The contract is read-only. Sending, flags, mailbox changes, attachments, search,
-and push are later changes.
+The contract covers reads and the first writes: sending a plain-text message and
+changing a message's flags. Mailbox changes, attachments, search, and push are
+later changes.
 
 ## Runtime and build
 
@@ -45,10 +46,24 @@ malformed value stops the process before it serves, naming the variable.
 | `MAILFLOW_PAGE_SIZE_DEFAULT` | no | `25` | Page size when the caller does not ask |
 | `MAILFLOW_PAGE_SIZE_MAX` | no | `100` | Largest page the contract returns |
 | `MAILFLOW_BODY_MAX_BYTES` | no | `262144` | Cap on a returned text body |
+| `MAILFLOW_DB_HOST` | no | `db` | Application database host; Compose DNS on the private data network |
+| `MAILFLOW_DB_PORT` | no | `5432` | Application database port |
+| `MAILFLOW_DB_NAME` | no | `mailflow` | Application database name |
+| `MAILFLOW_DB_USER` | no | `mailflow` | Application database user |
+| `MAILFLOW_DB_PASSWORD` | yes | — | Application database password; never logged |
+| `MAILFLOW_IDEMPOTENCY_TTL` | no | `24h` | How long a completed send key replays its result |
+| `MAILFLOW_IDEMPOTENCY_LEASE` | no | `2m` | How long an unfinished send blocks its key; must exceed the request timeout |
+| `MAILFLOW_SEND_MAX_RECIPIENTS` | no | `50` | Largest number of `to` plus `cc` recipients |
+| `MAILFLOW_SEND_MAX_BYTES` | no | `262144` | Cap on a submitted text body |
 
 `MAILFLOW_JMAP_URL` names where to connect; `MAILFLOW_JMAP_HOSTNAME` is the TLS
 server name. They differ when the service runs in a container: the URL names the
 mail container, while the certificate is issued for the mail hostname.
+
+The database holds application state only (idempotency records today); it never
+holds mailbox state. The service refuses to start when it cannot reach it, so a
+send is never accepted without a record. See
+[`docs/application-database.md`](application-database.md).
 
 Inside a container the process must bind `0.0.0.0:8080`, because Docker publishes
 to the container's address rather than to its loopback. The host-side binding is
@@ -56,43 +71,44 @@ what stays on loopback.
 
 ## Running it against the local stack
 
-The mail stack must be running first. The service joins the mail project's
-network so it can reach the mail container:
+The mail stack must be running first. The application is a Compose project of
+its own (`deploy/app`) with the service and its PostgreSQL database. The service
+joins the mail project's network so it can reach the mail container; the
+database joins only the application's private data network.
 
 ```sh
 docker buildx build --platform linux/arm64 -t mailflow-api:dev app/
-mkdir -p deploy/app/certs
-docker cp mailflow-stalwart:/etc/stalwart/tls/ca.pem deploy/app/certs/ca.pem
 
-docker run -d --name mailflow-api \
-  --network mailflow-mail_default \
-  -p 127.0.0.1:8080:8080 \
-  -e MAILFLOW_JMAP_URL=https://mailflow-stalwart/jmap/ \
-  -e MAILFLOW_JMAP_HOSTNAME=mail.mailflow.test \
-  -e MAILFLOW_CA_FILE=/etc/mailflow/ca.pem \
-  -e MAILFLOW_LISTEN_ADDR=0.0.0.0:8080 \
-  -v "$PWD/deploy/app/certs/ca.pem:/etc/mailflow/ca.pem:ro" \
-  mailflow-api:dev
+# A copy of the mail CA in an app-owned volume. Never mount the mail data
+# directory: the deployment units share traffic, not files.
+docker volume create mailflow-app-ca >/dev/null
+docker cp mailflow-stalwart:/etc/stalwart/tls/ca.pem - \
+  | docker run --rm --user 0 -i -v mailflow-app-ca:/certs \
+      --entrypoint sh mailflow-api:dev \
+      -c 'tar -xf - -C /certs && chmod 644 /certs/ca.pem'
+
+cd deploy/app
+cp .env.example .env      # set MAILFLOW_DB_PASSWORD for local use
+docker compose up -d
 ```
 
-The CA copy is a copy, not a mount of the mail data directory: the two
-deployment units share traffic, not files. The deployed project puts that copy
-in an app-owned volume (`mailflow-app-ca`) instead of a host path, because the
-runner is a container and the host Docker daemon cannot see a file it writes;
-the recipe above mounts a local copy directly. If the local mail stack already
-holds host port 8080 (its setup listener does when `MAIL_SETUP_PORT=8080`),
+The database has no published port and its volume (`mailflow-app-db`) is
+application-owned. An application deploy or restart preserves it; only an
+explicit `docker compose down --volumes` deletes it. If the local mail stack
+already holds host port 8080 (its setup listener does when `MAIL_SETUP_PORT=8080`),
 publish the API on another loopback port instead.
 
 On a deployed host the workflow generates `deploy/app/.env` from the example on
 every run. Set the published port as `MAILFLOW_API_PORT` in the repository's
-`production` environment (default 8080); a value edited in the checkout does not
-survive, because the checkout is cleaned. If another container already publishes
-the port, the workflow fails before creating the application container and names
+`production` environment (default 8080), and the database password as the
+`MAILFLOW_DB_PASSWORD` secret; a value edited in the checkout does not survive,
+because the checkout is cleaned. If another container already publishes the
+port, the workflow fails before creating the application container and names
 the variable to change. The application's own container from the previous deploy
 does not count: that run replaces it.
 
-Stop it with `docker rm -f mailflow-api`. That touches nothing in the mail
-project.
+Stop the stack with `cd deploy/app && docker compose down`. That touches nothing
+in the mail project and keeps the database volume.
 
 ## Authentication
 
@@ -114,8 +130,9 @@ instance, using the demo accounts from `deploy/mail/.env`:
 ./app/scripts/verify-api.py --base http://127.0.0.1:8080
 ```
 
-It checks paging, body content, cross-account refusal, malformed input, and
-scans every response it receives for vendor vocabulary.
+It checks paging, body content, cross-account refusal, malformed input, sending
+and replay, flag updates, and scans every response it receives — reads and
+writes — for vendor vocabulary.
 
 ## Endpoints
 
@@ -197,6 +214,87 @@ empty when the message has no such part. A body longer than
 `MAILFLOW_BODY_MAX_BYTES` is cut and `textTruncated` is `true`; the cut never
 splits a UTF-8 character.
 
+### `POST /v1/messages`
+
+Sends a plain-text message as the authenticated account. The sender is the
+account's own identity; the request cannot name one.
+
+The `Idempotency-Key` header is required: 1–200 visible ASCII characters. The
+key is scoped to the authenticated account, so two accounts may use the same
+value.
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 5f0f8b9a-2f0e-4a35-9d6a-3f2f4b8c1d20' \
+  -d '{
+    "to": [{"name": "Bob", "email": "bob@mailflow.test"}],
+    "cc": [],
+    "subject": "Lunch",
+    "text": "Noon?\n"
+  }' \
+  http://127.0.0.1:8080/v1/messages
+```
+
+`to` must name at least one recipient; `cc` may be omitted or empty. The request
+may name at most `MAILFLOW_SEND_MAX_RECIPIENTS` recipients in total, and the
+text body at most `MAILFLOW_SEND_MAX_BYTES` bytes. Every recipient must be in
+the authenticated account's mail domain: the service is not a relay, and an
+outside address is `invalid_request` rather than a silent send. An unknown
+request field is also `invalid_request`; there is no vendor-shaped field to
+accept.
+
+A first send answers `201`:
+
+```json
+{ "id": "msg1_ZA.YjJhYWFhYXA" }
+```
+
+The identifier names the caller's copy in their `sent` mailbox. The recipient's
+copy is a separate message with its own identifier.
+
+Sending the same request with the same key again answers `201` with the same
+body and `Idempotency-Replayed: true`; it does not send a second message. A
+different request under the same key answers `409 conflict`. A duplicate that
+arrives while the first attempt is still running answers `409 in_progress`.
+When the mail server refuses the message itself, the answer is
+`422 send_rejected` and the key is released so the caller may correct the input
+and retry. When the outcome is unknown (a timeout or an unreachable mail
+server), the claim is kept for the lease window so a retry cannot deliver a
+duplicate; the caller should treat the first attempt as unknown.
+
+### `PATCH /v1/messages/{messageID}`
+
+Sets a message's flags. The request states the desired value; at least one field
+is required, and repeating the same request changes nothing.
+
+```sh
+curl -sS -X PATCH -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"read": true, "starred": true}' \
+  http://127.0.0.1:8080/v1/messages/msg1_ZA.YjJhYWFhYXA
+```
+
+The answer is the message summary in the same shape as a list entry:
+
+```json
+{
+  "id": "msg1_ZA.YjJhYWFhYXA",
+  "subject": "Lunch",
+  "from": { "name": "", "email": "alice@mailflow.test" },
+  "receivedAt": "2026-11-17T02:11:58Z",
+  "read": true,
+  "starred": true,
+  "hasAttachment": false
+}
+```
+
+Only `read` and `starred` exist. An omitted field is left unchanged; an unknown
+field, an empty body, or a value that is not a boolean is `invalid_request`. A
+message identifier that belongs to another account, or no longer exists, is
+`not_found`. The patch touches only the named flags, so a draft or an attachment
+keeps its state.
+
 ### `GET /healthz`
 
 ```json
@@ -236,13 +334,27 @@ Every failure shares one shape:
 | `unauthorized` | 401 | Missing or rejected credentials |
 | `not_found` | 404 | No such mailbox or message for this caller |
 | `invalid_cursor` | 400 | The cursor no longer resolves; restart from the first page |
-| `invalid_request` | 400 | A parameter is malformed |
-| `method_not_allowed` | 405 | Only `GET` and `HEAD` are served |
-| `service_unavailable` | 503 | The mail server is unreachable or timed out |
+| `invalid_request` | 400 | A parameter or body is malformed, or the request is not valid for this account |
+| `method_not_allowed` | 405 | The path does not serve that method; `Allow` names the ones it does |
+| `conflict` | 409 | The idempotency key was already used for a different request |
+| `in_progress` | 409 | A send with this idempotency key is still being processed |
+| `send_rejected` | 422 | The mail server declined the message itself; retrying the same input cannot succeed |
+| `service_unavailable` | 503 | The mail server or the application database is unreachable or timed out |
 | `internal` | 500 | An unexpected failure |
 
 Messages are fixed strings for humans. They never carry vendor error text,
 stack traces, or credentials.
+
+## Idempotency retention
+
+A completed send key replays its result for `MAILFLOW_IDEMPOTENCY_TTL` (default
+24 hours). After that the record expires and a retry with the same key is a new
+send, so a client that retries days later must not assume the original result.
+An unfinished claim blocks its key for `MAILFLOW_IDEMPOTENCY_LEASE` (default 2
+minutes); after the lease a retry may take over, which bounds a duplicate but
+cannot prove the first attempt did not happen. Records live in the application
+database, not in the mail server; see
+[`docs/application-database.md`](application-database.md).
 
 ## Versioning
 

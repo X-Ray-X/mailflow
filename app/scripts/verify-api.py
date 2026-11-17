@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the published read contract against a running Mailflow API.
+"""Exercise the published contract against a running Mailflow API.
 
 This is a verification tool, not a client: it deliberately inspects the two
 segments of an identifier to report whether a cross-account request was the
@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -28,13 +29,15 @@ DEFAULT_BASE = "http://127.0.0.1:8080"
 FORBIDDEN = [
     "urn:", "$seen", "$flagged", "$draft", "$hasattachment", "keywords",
     "blobid", "threadid", "messageid", "mailboxids", "accountid", "bodyvalues",
-    "textbody", "notfound", "querystate", "sessionstate", "anchor",
+    "textbody", "notfound", "notcreated", "querystate", "sessionstate", "anchor",
     "email/", "mailbox/", "jmap", "stalwart", "mail.mailflow.test",
+    "emailsubmission", "identity/", "invalidproperties", "onsuccessupdateemail",
 ]
 
 DOCUMENTED_CODES = {
     "unauthorized", "not_found", "invalid_cursor", "invalid_request",
     "method_not_allowed", "service_unavailable", "internal",
+    "conflict", "in_progress", "send_rejected",
 }
 
 
@@ -54,11 +57,15 @@ class Api:
         self.base = base.rstrip("/")
         self.payloads = []
 
-    def call(self, path, creds=None, method="GET", base64_auth=True):
-        request = urllib.request.Request(self.base + path, method=method)
+    def call(self, path, creds=None, method="GET", base64_auth=True, body=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(self.base + path, method=method, data=data)
         if creds is not None:
             token = base64.b64encode(f"{creds[0]}:{creds[1]}".encode()).decode()
             request.add_header("Authorization", "Basic " + token)
+        request.add_header("Content-Type", "application/json")
+        for name, value in (headers or {}).items():
+            request.add_header(name, value)
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 body = response.read()
@@ -239,6 +246,106 @@ def main():
     status, _, body = api.call("/v1/messages/not-an-identifier", accounts["alice"])
     report.check("a malformed identifier is not found",
                  status == 404 and body.get("code") == "not_found", f"status={status}")
+
+    # --- sending and flags --------------------------------------------------
+    alice_creds, bob_creds = accounts["alice"], accounts["bob"]
+    stamp = int(time.time() * 1000)
+    subject = f"Mailflow verifier {stamp}"
+    key = f"verify-{stamp}"
+    send_body = {
+        "to": [{"name": "Bob", "email": bob_creds[0]}],
+        "subject": subject,
+        "text": "Sent by app/scripts/verify-api.py.\n",
+    }
+
+    status, headers, sent = api.call("/v1/messages", alice_creds, method="POST",
+                                     body=send_body, headers={"Idempotency-Key": key})
+    sent_id = sent.get("id") or ""
+    report.check("alice: send accepted",
+                 status == 201 and sent_id.startswith("msg1_"), f"status={status} body={sent}")
+    report.check("a first send is not a replay",
+                 not (headers.get("Idempotency-Replayed") or ""),
+                 headers.get("Idempotency-Replayed") or "")
+
+    status, _, detail = api.call(f"/v1/messages/{sent_id}", alice_creds)
+    report.check("alice: the sent copy is readable",
+                 status == 200 and detail.get("subject") == subject, f"status={status}")
+
+    status, headers, replay = api.call("/v1/messages", alice_creds, method="POST",
+                                       body=send_body, headers={"Idempotency-Key": key})
+    report.check("the same key replays the original result",
+                 status == 201 and replay.get("id") == sent_id
+                 and (headers.get("Idempotency-Replayed") or "") == "true",
+                 f"status={status} id={replay.get('id')} "
+                 f"replay={headers.get('Idempotency-Replayed')}")
+
+    changed = dict(send_body, subject=subject + " (changed)")
+    status, _, body = api.call("/v1/messages", alice_creds, method="POST",
+                               body=changed, headers={"Idempotency-Key": key})
+    report.check("a reused key with a different request is a conflict",
+                 status == 409 and body.get("code") == "conflict", f"status={status} body={body}")
+
+    status, _, body = api.call("/v1/messages", alice_creds, method="POST", body=send_body)
+    report.check("a send without a key is refused",
+                 status == 400 and body.get("code") == "invalid_request",
+                 f"status={status} body={body}")
+
+    foreign = dict(send_body, to=[{"email": "nobody@example.invalid"}])
+    status, _, body = api.call("/v1/messages", alice_creds, method="POST", body=foreign,
+                               headers={"Idempotency-Key": key + "-foreign"})
+    report.check("a recipient outside the local domain is refused",
+                 status == 400 and body.get("code") == "invalid_request",
+                 f"status={status} body={body}")
+
+    status, _, listing = api.call(f"/v1/mailboxes/{alice_sent['id']}/messages?limit=100",
+                                  alice_creds)
+    report.check("alice: the sent copy is in the sent mailbox",
+                 status == 200 and any(m["id"] == sent_id for m in (listing.get("messages") or [])),
+                 f"status={status}")
+
+    status, _, listing = api.call(f"/v1/mailboxes/{bob_inbox['id']}/messages?limit=100",
+                                  bob_creds)
+    received = next((m for m in (listing.get("messages") or []) if m.get("subject") == subject), None)
+    report.check("bob: the message arrived in the inbox",
+                 status == 200 and received is not None, f"status={status}")
+
+    if received is not None:
+        received_id = received["id"]
+        status, _, updated = api.call(f"/v1/messages/{received_id}", bob_creds, method="PATCH",
+                                      body={"read": True, "starred": True})
+        report.check("bob: flags can be set",
+                     status == 200 and updated.get("read") is True
+                     and updated.get("starred") is True, f"status={status} body={updated}")
+
+        status, _, again = api.call(f"/v1/messages/{received_id}", bob_creds, method="PATCH",
+                                    body={"read": True, "starred": True})
+        report.check("a repeated flag patch is a no-op",
+                     status == 200 and again.get("read") is True
+                     and again.get("starred") is True, f"status={status} body={again}")
+
+        status, _, body = api.call(f"/v1/messages/{received_id}", bob_creds, method="PATCH",
+                                   body={"seen": True})
+        report.check("an unknown flag field is refused",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call(f"/v1/messages/{sent_id}", bob_creds, method="PATCH",
+                                   body={"read": False})
+        report.check("bob cannot flag alice's message",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+
+    # A flag change must not disturb attachment state. If the mailbox holds no
+    # attachment right now, the live task check covered this instead.
+    attachment = next((m for m in (listing.get("messages") or []) if m.get("hasAttachment")), None)
+    if attachment is not None:
+        status, _, updated = api.call(f"/v1/messages/{attachment['id']}", bob_creds,
+                                      method="PATCH", body={"read": True, "starred": True})
+        report.check("a flag change preserves hasAttachment",
+                     status == 200 and updated.get("hasAttachment") is True,
+                     f"status={status} body={updated}")
+    else:
+        print("SKIP no attachment in bob's inbox to check flag preservation")
 
     # --- methods and paths --------------------------------------------------
     status, headers, body = api.call("/v1/mailboxes", accounts["bob"], method="POST")

@@ -74,7 +74,7 @@ func (s *Server) mailboxes(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return
 	}
-	list, err := s.reader.Mailboxes(r.Context(), credentials(r.Context()))
+	list, err := s.service.Mailboxes(r.Context(), credentials(r.Context()))
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -102,7 +102,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page, err := s.reader.Messages(r.Context(), credentials(r.Context()), r.PathValue("mailboxID"), mail.PageRequest{
+	page, err := s.service.Messages(r.Context(), credentials(r.Context()), r.PathValue("mailboxID"), mail.PageRequest{
 		Limit:  limit,
 		Cursor: r.URL.Query().Get("cursor"),
 	})
@@ -117,24 +117,29 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		HasMore:    page.HasMore,
 	}
 	for _, m := range page.Messages {
-		resp.Messages = append(resp.Messages, messageSummaryDTO{
-			ID:            m.ID,
-			Subject:       m.Subject,
-			From:          toAddressDTO(m.From),
-			ReceivedAt:    m.Received,
-			Read:          m.Read,
-			Starred:       m.Starred,
-			HasAttachment: m.HasAttachment,
-		})
+		resp.Messages = append(resp.Messages, toMessageSummaryDTO(m))
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// messageByID dispatches the methods the contract publishes on one message:
+// read it, or set its flags.
+func (s *Server) messageByID(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		s.message(w, r)
+	case http.MethodPatch:
+		s.setFlags(w, r)
+	default:
+		writeMethodNotAllowed(w, "GET, HEAD, PATCH")
+	}
 }
 
 func (s *Server) message(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return
 	}
-	msg, err := s.reader.Message(r.Context(), credentials(r.Context()), r.PathValue("messageID"))
+	msg, err := s.service.Message(r.Context(), credentials(r.Context()), r.PathValue("messageID"))
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -152,6 +157,18 @@ func (s *Server) message(w http.ResponseWriter, r *http.Request) {
 		Text:          msg.Text,
 		TextTruncated: msg.TextTruncated,
 	})
+}
+
+func toMessageSummaryDTO(m mail.MessageSummary) messageSummaryDTO {
+	return messageSummaryDTO{
+		ID:            m.ID,
+		Subject:       m.Subject,
+		From:          toAddressDTO(m.From),
+		ReceivedAt:    m.Received,
+		Read:          m.Read,
+		Starred:       m.Starred,
+		HasAttachment: m.HasAttachment,
+	}
 }
 
 func toAddressDTO(a mail.Address) addressDTO {

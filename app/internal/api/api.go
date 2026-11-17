@@ -1,8 +1,9 @@
-// Package api publishes Mailflow's read contract over HTTP.
+// Package api publishes Mailflow's contract over HTTP.
 //
-// It depends on mail.Reader, never on the mail server's protocol, and every
-// response body is built from this package's own types. That is what keeps
-// vendor detail out of the public payload: there is no field to carry it.
+// It depends on mail.Reader and mail.Writer, never on the mail server's
+// protocol, and every response body is built from this package's own types.
+// That is what keeps vendor detail out of the public payload: there is no field
+// to carry it.
 package api
 
 import (
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/X-Ray-X/mailflow/app/internal/idempotency"
 	"github.com/X-Ray-X/mailflow/app/internal/mail"
 )
 
@@ -28,20 +30,49 @@ const (
 	codeMethodNotAllowed   = "method_not_allowed"
 	codeServiceUnavailable = "service_unavailable"
 	codeInternal           = "internal"
+	codeConflict           = "conflict"
+	codeInProgress         = "in_progress"
+	codeSendRejected       = "send_rejected"
 )
 
-// Options are the server's public bounds.
+// Service is the mail contract the HTTP layer depends on.
+type Service interface {
+	mail.Reader
+	mail.Writer
+}
+
+// Options are the server's public bounds and its write-path dependencies.
 type Options struct {
 	// Timeout bounds one request, including the mail server call.
 	Timeout time.Duration
 	// PageSizeMax is the largest page the contract will return.
 	PageSizeMax int
 	Logger      *slog.Logger
+
+	// Records is the durable idempotency record store. A nil store makes
+	// sends fail closed; it never lets one through unrecorded.
+	Records idempotency.Recorder
+	// IdempotencyTTL is how long a completed send key resolves to its result.
+	IdempotencyTTL time.Duration
+	// IdempotencyLease bounds how long an unfinished claim blocks its key.
+	IdempotencyLease time.Duration
+
+	// SendMaxRecipients bounds to plus cc. Zero means no bound, which is only
+	// useful in tests; configuration always supplies a positive value.
+	SendMaxRecipients int
+	// SendMaxBytes bounds the text body in bytes. Zero means no bound.
+	SendMaxBytes int64
 }
 
 // Server is the HTTP surface.
 type Server struct {
-	reader      mail.Reader
+	service           Service
+	records           idempotency.Recorder
+	idemTTL           time.Duration
+	idemLease         time.Duration
+	sendMaxRecipients int
+	sendMaxBytes      int64
+
 	timeout     time.Duration
 	pageSizeMax int
 	log         *slog.Logger
@@ -49,22 +80,28 @@ type Server struct {
 }
 
 // New builds the server and its routes.
-func New(reader mail.Reader, opts Options) *Server {
+func New(service Service, opts Options) *Server {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
 	s := &Server{
-		reader:      reader,
-		timeout:     opts.Timeout,
-		pageSizeMax: opts.PageSizeMax,
-		log:         opts.Logger,
+		service:           service,
+		records:           opts.Records,
+		idemTTL:           opts.IdempotencyTTL,
+		idemLease:         opts.IdempotencyLease,
+		sendMaxRecipients: opts.SendMaxRecipients,
+		sendMaxBytes:      opts.SendMaxBytes,
+		timeout:           opts.Timeout,
+		pageSizeMax:       opts.PageSizeMax,
+		log:               opts.Logger,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/v1/mailboxes", s.protected(s.mailboxes))
 	mux.HandleFunc("/v1/mailboxes/{mailboxID}/messages", s.protected(s.messages))
-	mux.HandleFunc("/v1/messages/{messageID}", s.protected(s.message))
+	mux.HandleFunc("/v1/messages", s.protected(s.send))
+	mux.HandleFunc("/v1/messages/{messageID}", s.protected(s.messageByID))
 	// Catch-all so an unknown path is a JSON error like every other failure.
 	mux.HandleFunc("/", s.notFound)
 
@@ -209,6 +246,14 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusNotFound, codeNotFound, "not found")
 	case errors.Is(err, mail.ErrInvalidCursor):
 		writeError(w, http.StatusBadRequest, codeInvalidCursor, "the cursor is no longer valid; restart from the first page")
+	case errors.Is(err, mail.ErrInvalidInput):
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "the request is not valid for this account")
+	case errors.Is(err, mail.ErrRejected):
+		writeError(w, http.StatusUnprocessableEntity, codeSendRejected, "the message was not accepted for delivery")
+	case errors.Is(err, mail.ErrConflict):
+		writeError(w, http.StatusConflict, codeConflict, "the idempotency key was already used for a different request")
+	case errors.Is(err, mail.ErrInProgress):
+		writeError(w, http.StatusConflict, codeInProgress, "a send with this idempotency key is already in progress")
 	case errors.Is(err, mail.ErrUnavailable):
 		s.log.Warn("mail service unavailable", "route", r.Pattern)
 		writeError(w, http.StatusServiceUnavailable, codeServiceUnavailable, "the mail service is unavailable")
@@ -227,9 +272,15 @@ func (s *Server) requireGet(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return true
 	}
-	w.Header().Set("Allow", "GET, HEAD")
-	writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
+	writeMethodNotAllowed(w, "GET, HEAD")
 	return false
+}
+
+// writeMethodNotAllowed answers with the contract's JSON error shape and names
+// the methods the path does accept.
+func writeMethodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
 }
 
 // pageSize parses the limit parameter. Absent means the adapter's default;

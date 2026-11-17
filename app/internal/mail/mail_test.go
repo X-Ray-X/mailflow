@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,22 @@ type fakeUpstream struct {
 
 	emails    []jmap.Email
 	emailsErr error
+
+	identities    []jmap.Identity
+	identitiesErr error
+
+	sendID    string
+	sendErr   error
+	sent      jmap.OutgoingEmail
+	sendCalls int
+
+	destroyed  []string
+	destroyErr error
+
+	keywordsID      string
+	keywordsRead    *bool
+	keywordsStarred *bool
+	keywordsErr     error
 
 	gotAccount     string
 	gotMailboxID   string
@@ -82,8 +99,34 @@ func (f *fakeUpstream) GetEmails(_ context.Context, _ jmap.Credentials, accountI
 	return f.emails, f.emailsErr
 }
 
+func (f *fakeUpstream) Identities(_ context.Context, _ jmap.Credentials, accountID string) ([]jmap.Identity, error) {
+	f.gotAccount = accountID
+	return f.identities, f.identitiesErr
+}
+
+func (f *fakeUpstream) SendMessage(_ context.Context, _ jmap.Credentials, accountID string, msg jmap.OutgoingEmail) (string, error) {
+	f.gotAccount = accountID
+	f.sent = msg
+	f.sendCalls++
+	return f.sendID, f.sendErr
+}
+
+func (f *fakeUpstream) DestroyEmails(_ context.Context, _ jmap.Credentials, accountID string, ids ...string) error {
+	f.gotAccount = accountID
+	f.destroyed = append(f.destroyed, ids...)
+	return f.destroyErr
+}
+
+func (f *fakeUpstream) SetEmailKeywords(_ context.Context, _ jmap.Credentials, accountID, emailID string, read, starred *bool) error {
+	f.gotAccount = accountID
+	f.keywordsID = emailID
+	f.keywordsRead = read
+	f.keywordsStarred = starred
+	return f.keywordsErr
+}
+
 func newTestService(f *fakeUpstream) *Service {
-	return NewService(f, 25, 100, 1024)
+	return NewService(f, 25, 100, 1024, nil)
 }
 
 func TestMapMailboxRoles(t *testing.T) {
@@ -504,7 +547,7 @@ func TestServiceMessageCapsAndMaps(t *testing.T) {
 		TextBody:   []jmap.BodyPart{{PartID: "1", Type: "text/plain"}},
 		BodyValues: map[string]jmap.BodyValue{"1": {Value: strings.Repeat("x", 50)}},
 	}}}
-	svc := NewService(f, 25, 100, 8)
+	svc := NewService(f, 25, 100, 8, nil)
 
 	got, err := svc.Message(context.Background(), testCreds, ids.Message(testAccount, "e1"))
 	if err != nil {
@@ -533,5 +576,166 @@ func TestServiceMessageNotFound(t *testing.T) {
 	}
 	if f2.sessionCalls != 0 {
 		t.Fatal("touched the mail server for a malformed identifier")
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func sendFixture() *fakeUpstream {
+	return &fakeUpstream{
+		mailboxes: []jmap.Mailbox{
+			{ID: "d", Role: "drafts", Name: "Drafts"},
+			{ID: "e", Role: "sent", Name: "Sent"},
+		},
+		identities: []jmap.Identity{{ID: "id1", Name: "Bob", Email: testCreds.User}},
+		sendID:     "e1",
+	}
+}
+
+func TestServiceSendUsesIdentityAndMailboxes(t *testing.T) {
+	f := sendFixture()
+	got, err := newTestService(f).Send(context.Background(), testCreds, OutgoingMessage{
+		To:      []Address{{Name: "Alice", Email: "alice@example.test"}},
+		Cc:      []Address{{Email: "carol@example.test"}},
+		Subject: "Lunch",
+		Text:    "Noon?",
+	})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	account, vendor, err := ids.ParseMessage(got)
+	if err != nil || account != testAccount || vendor != "e1" {
+		t.Fatalf("identifier = %q (account %q vendor %q error %v)", got, account, vendor, err)
+	}
+	if f.sent.DraftsMailboxID != "d" || f.sent.SentMailboxID != "e" {
+		t.Fatalf("mailboxes = %+v", f.sent)
+	}
+	if f.sent.IdentityID != "id1" || f.sent.From.Email != testCreds.User {
+		t.Fatalf("sender = %+v", f.sent)
+	}
+	if len(f.sent.To) != 1 || f.sent.To[0].Email != "alice@example.test" {
+		t.Fatalf("to = %+v", f.sent.To)
+	}
+	if len(f.sent.Cc) != 1 || f.sent.Cc[0].Email != "carol@example.test" {
+		t.Fatalf("cc = %+v", f.sent.Cc)
+	}
+	if f.sent.Subject != "Lunch" || f.sent.Text != "Noon?" {
+		t.Fatalf("message = %+v", f.sent)
+	}
+}
+
+func TestServiceSendRefusesRecipientOutsideTheDomain(t *testing.T) {
+	f := sendFixture()
+	_, err := newTestService(f).Send(context.Background(), testCreds, OutgoingMessage{
+		To:   []Address{{Email: "someone@elsewhere.test"}},
+		Text: "hi",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.sendCalls != 0 {
+		t.Fatal("submitted a message to a foreign domain")
+	}
+}
+
+func TestServiceSendWithoutIdentityIsRejected(t *testing.T) {
+	f := sendFixture()
+	f.identities = nil
+	_, err := newTestService(f).Send(context.Background(), testCreds, OutgoingMessage{
+		To: []Address{{Email: "alice@example.test"}},
+	})
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("error = %v, want ErrRejected", err)
+	}
+	if f.sendCalls != 0 {
+		t.Fatal("submitted without a sending identity")
+	}
+}
+
+func TestServiceSendCompensatesAFailedSubmission(t *testing.T) {
+	f := sendFixture()
+	f.sendErr = fmt.Errorf("%w: submission refused", jmap.ErrRejected)
+	_, err := newTestService(f).Send(context.Background(), testCreds, OutgoingMessage{
+		To:   []Address{{Email: "alice@example.test"}},
+		Text: "hi",
+	})
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("error = %v, want ErrRejected", err)
+	}
+	if len(f.destroyed) != 1 || f.destroyed[0] != "e1" {
+		t.Fatalf("destroyed = %v, want the created draft", f.destroyed)
+	}
+}
+
+func TestServiceSendKeepsTheDraftWhenCompensationFails(t *testing.T) {
+	f := sendFixture()
+	f.sendErr = fmt.Errorf("%w: submission refused", jmap.ErrRejected)
+	f.destroyErr = errors.New("destroy failed")
+	_, err := newTestService(f).Send(context.Background(), testCreds, OutgoingMessage{
+		To:   []Address{{Email: "alice@example.test"}},
+		Text: "hi",
+	})
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("error = %v, want ErrRejected", err)
+	}
+	if len(f.destroyed) != 1 {
+		t.Fatalf("compensation was not attempted: %v", f.destroyed)
+	}
+}
+
+func TestServiceSendChoosesTheMatchingIdentity(t *testing.T) {
+	f := sendFixture()
+	f.identities = []jmap.Identity{
+		{ID: "other", Email: "someone@example.test"},
+		{ID: "id1", Email: testCreds.User},
+	}
+	if _, err := newTestService(f).Send(context.Background(), testCreds, OutgoingMessage{
+		To: []Address{{Email: "alice@example.test"}},
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if f.sent.IdentityID != "id1" {
+		t.Fatalf("identity = %q, want the caller's", f.sent.IdentityID)
+	}
+}
+
+func TestServiceSetFlagsPatchesOnlyNamedKeywords(t *testing.T) {
+	f := &fakeUpstream{emails: []jmap.Email{{
+		ID:            "e1",
+		Subject:       "Hello",
+		Keywords:      map[string]bool{"$seen": true, "$hasattachment": true},
+		HasAttachment: true,
+	}}}
+	got, err := newTestService(f).SetFlags(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), FlagPatch{Read: boolPtr(true)})
+	if err != nil {
+		t.Fatalf("SetFlags: %v", err)
+	}
+	if f.keywordsID != "e1" || f.keywordsRead == nil || !*f.keywordsRead || f.keywordsStarred != nil {
+		t.Fatalf("patch = id %q read %v starred %v", f.keywordsID, f.keywordsRead, f.keywordsStarred)
+	}
+	if !got.Read || !got.HasAttachment {
+		t.Fatalf("summary = %+v, want read and the attachment preserved", got)
+	}
+}
+
+func TestServiceSetFlagsRejectsAnotherAccountsMessage(t *testing.T) {
+	f := &fakeUpstream{}
+	_, err := newTestService(f).SetFlags(context.Background(), testCreds,
+		ids.Message("other-account", "e1"), FlagPatch{Read: boolPtr(true)})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.keywordsID != "" {
+		t.Fatal("patched a message identifier from another account")
+	}
+}
+
+func TestServiceSetFlagsMapsNotFound(t *testing.T) {
+	f := &fakeUpstream{keywordsErr: jmap.ErrNotFound}
+	_, err := newTestService(f).SetFlags(context.Background(), testCreds,
+		ids.Message(testAccount, "gone"), FlagPatch{Starred: boolPtr(true)})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 }

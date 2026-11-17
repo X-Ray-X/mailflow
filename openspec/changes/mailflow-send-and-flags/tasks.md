@@ -5,15 +5,15 @@ verified; a task is done when that check has been run and its result known.
 
 ## 1. Probe the pinned release's write surface
 
-- [ ] Exercise, against the running stack on the pinned release, `Identity/get`,
+- [x] Exercise, against the running stack on the pinned release, `Identity/get`,
       `Email/set` create with `bodyValues`, `EmailSubmission/set` with an
       explicit envelope, `onSuccessUpdateEmail`, and a per-keyword
       `keywords/$seen` patch.
-- [ ] Record the exact request and response shapes, the observed role of the
+- [x] Record the exact request and response shapes, the observed role of the
       drafts and sent mailboxes, whether a keyword patch preserves
       `$hasattachment`, and whether submission itself moves the message out of
       Drafts, in `docs/integration-surface.md`.
-- [ ] Remove the corresponding lines from its "Not verified" section, leaving
+- [x] Remove the corresponding lines from its "Not verified" section, leaving
       anything still unprobed listed.
 
 **Verify:** the document contains the commands used and the observed JSON;
@@ -22,18 +22,18 @@ traceable to a command in it.
 
 ## 2. Add the database to the application deployment unit
 
-- [ ] Add a `db` service to `deploy/app/compose.yaml`: arm64-native pinned image
+- [x] Add a `db` service to `deploy/app/compose.yaml`: arm64-native pinned image
       with its digest recorded, data in an application-owned volume, no
       published port, a `pg_isready` health check, bounded logging, and the
       application's private network.
-- [ ] Make `api` depend on a healthy `db` and pass the `MAILFLOW_DB_*` values.
-- [ ] Add the new keys to `deploy/app/.env.example`, and have
+- [x] Make `api` depend on a healthy `db` and pass the `MAILFLOW_DB_*` values.
+- [x] Add the new keys to `deploy/app/.env.example`, and have
       `.github/workflows/deploy-app.yml` write `MAILFLOW_DB_PASSWORD` from the
       production environment into the generated `.env`.
-- [ ] Update the application structural gate in `.github/workflows/ci.yml` to
+- [x] Update the application structural gate in `.github/workflows/ci.yml` to
       expect exactly the service and the database, and to fail on a published
       database port, a non-application-owned volume, or any mail path.
-- [ ] Create `docs/application-database.md` with the pinned image and digest, the
+- [x] Create `docs/application-database.md` with the pinned image and digest, the
       volume name, the network, and the no-published-port rule.
 
 **Verify:** `cd deploy/app && docker compose --env-file .env.example config`
@@ -44,16 +44,16 @@ step is only verified on the next real deployment and must be reported as such.
 
 ## 3. Add database configuration and the idempotency store
 
-- [ ] Add `MAILFLOW_DB_HOST`, `_PORT`, `_NAME`, `_USER`, `_PASSWORD`,
+- [x] Add `MAILFLOW_DB_HOST`, `_PORT`, `_NAME`, `_USER`, `_PASSWORD`,
       `MAILFLOW_IDEMPOTENCY_TTL`, and `MAILFLOW_IDEMPOTENCY_LEASE` to config,
       validated at startup, with the lease required to exceed the request
       timeout; never log a value or the assembled connection string.
-- [ ] Add `internal/store` with a `pgxpool` pool, a bounded startup ping, the
+- [x] Add `internal/store` with a `pgxpool` pool, a bounded startup ping, the
       embedded schema bootstrap under an advisory lock, and the claim/replay/
       conflict/lease operations described in `design.md`.
-- [ ] Add the janitor that deletes expired rows in bounded batches and stops on
+- [x] Add the janitor that deletes expired rows in bounded batches and stops on
       context cancellation.
-- [ ] Wire the pool into `main.go`, fail startup when it is unreachable, and
+- [x] Wire the pool into `main.go`, fail startup when it is unreachable, and
       close it on shutdown.
 
 **Verify:** `./app/scripts/go.sh` passes; config tests cover a missing password,
@@ -64,17 +64,17 @@ prints no password.
 
 ## 4. Implement sending in the mail adapter
 
-- [ ] Extend the JMAP client to send one envelope with create, submission, and
+- [x] Extend the JMAP client to send one envelope with create, submission, and
       success-update calls using back-references, keeping the observed shapes
       from task 1.
-- [ ] Resolve the sender from `Identity/get`, refuse when the caller has no
+- [x] Resolve the sender from `Identity/get`, refuse when the caller has no
       identity, and never accept a sender from the request.
-- [ ] Translate the result to a Mailflow message identifier; on submission
+- [x] Translate the result to a Mailflow message identifier; on submission
       failure, attempt to destroy the created draft and log a failed
       compensation.
-- [ ] Add an `ErrRejected` failure class for refusals and map it to the HTTP
+- [x] Add an `ErrRejected` failure class for refusals and map it to the HTTP
       layer's `send_rejected`.
-- [ ] Keep the adapter behind an interface so the HTTP layer is testable without
+- [x] Keep the adapter behind an interface so the HTTP layer is testable without
       a mail server.
 
 **Verify:** `./app/scripts/go.sh` passes, and unit tests with a fake upstream
@@ -83,16 +83,16 @@ failure, and the `ErrRejected` mapping.
 
 ## 5. Add `POST /v1/messages`
 
-- [ ] Validate the request: at least one recipient, recipient count and body
+- [x] Validate the request: at least one recipient, recipient count and body
       size within the configured bounds, recipients inside the caller's domain,
       no caller-supplied sender, and a well-formed `Idempotency-Key` (1–200
       visible ASCII characters).
-- [ ] Claim the key, perform the send, record success, and answer `201` with the
+- [x] Claim the key, perform the send, record success, and answer `201` with the
       Mailflow identifier; replay with `Idempotency-Replayed: true`; answer
       `conflict` and `in_progress` for the two duplicate cases.
-- [ ] Answer `service_unavailable` without sending when the store cannot be
+- [x] Answer `service_unavailable` without sending when the store cannot be
       reached.
-- [ ] Document the endpoint, the header, the request and response examples, the
+- [x] Document the endpoint, the header, the request and response examples, the
       new codes, and the retention/replay window in `docs/api.md`.
 
 **Verify:** `./app/scripts/go.sh` passes with table-driven tests for every
@@ -101,12 +101,12 @@ fetchable with `GET /v1/messages/{id}`, and bob's inbox lists it.
 
 ## 6. Add `PATCH /v1/messages/{id}`
 
-- [ ] Accept `read` and `starred`, require at least one, refuse unknown fields,
+- [x] Accept `read` and `starred`, require at least one, refuse unknown fields,
       refuse a foreign or unknown identifier with `not_found`, and return the
       updated summary.
-- [ ] Patch only the named keywords so a flag change preserves draft and
+- [x] Patch only the named keywords so a flag change preserves draft and
       attachment state.
-- [ ] Document the endpoint, its request shape, and its error behavior in
+- [x] Document the endpoint, its request shape, and its error behavior in
       `docs/api.md`.
 
 **Verify:** `./app/scripts/go.sh` passes; live requests mark a message read and
@@ -116,12 +116,12 @@ reports `hasAttachment` after both flips; an unknown field answers
 
 ## 7. Extend the contract verifier
 
-- [ ] Add checks to `app/scripts/verify-api.py`: send alice→bob, the same key
+- [x] Add checks to `app/scripts/verify-api.py`: send alice→bob, the same key
       replayed (one message, replay header), the same key with a different body
       (409), a missing key, an out-of-domain recipient, bob reading and starring
       the received message, and the sent copy appearing in alice's `sent`
       mailbox.
-- [ ] Include every write response in the vendor-vocabulary scan and assert the
+- [x] Include every write response in the vendor-vocabulary scan and assert the
       new codes are documented.
 
 **Verify:** `./app/scripts/verify-api.py --base http://127.0.0.1:8080` reports
@@ -129,12 +129,12 @@ every check PASS against the running stack, including the existing read checks.
 
 ## 8. Document operations and close the loop
 
-- [ ] Add `MAILFLOW_DB_PASSWORD` and the new endpoints to `README.md`, and record
+- [x] Add `MAILFLOW_DB_PASSWORD` and the new endpoints to `README.md`, and record
       the write surface as current instead of "next change".
-- [ ] Extend `docs/application-database.md`: retention and journal behaviour, a
+- [x] Extend `docs/application-database.md`: retention and journal behaviour, a
       `pg_dump` backup and restore recipe, what a stale restore means for
       idempotency, and the no-port/private-network rule.
-- [ ] Run the completion gate and commit on the feature branch with the
+- [x] Run the completion gate and commit on the feature branch with the
       verification result, naming anything that was not verified.
 
 **Verify:** `./app/scripts/go.sh`, `openspec validate mailflow-send-and-flags

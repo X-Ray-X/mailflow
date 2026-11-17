@@ -21,10 +21,14 @@ env:
   APP_COMPOSE_DIR: deploy/app
   MAIL_CONTAINER: mailflow-stalwart
   APP_CONTAINER: mailflow-api
+  APP_DB_CONTAINER: mailflow-db
   # Published loopback port. A host property, supplied by the "production"
   # environment like MAIL_DATA_DIR, because the checkout is cleaned on every run
   # and cannot carry it. Empty means the tracked default, 8080.
   MAILFLOW_API_PORT: ${{ vars.MAILFLOW_API_PORT }}
+  # The application database password, supplied by the "production" environment
+  # and written into the generated .env. Never committed, never printed.
+  MAILFLOW_DB_PASSWORD: ${{ secrets.MAILFLOW_DB_PASSWORD }}
 
 jobs:
   deploy:
@@ -75,8 +79,28 @@ jobs:
             echo "error: MAILFLOW_API_PORT must be 1-65535, got '$port'" >&2
             exit 1
           fi
+
+          # The database password is a secret from the "production" environment.
+          # Validate it before it reaches the file, and escape the three
+          # characters sed would otherwise interpret. A newline cannot be
+          # written to a single line, so it is refused rather than truncated.
+          db_password="${MAILFLOW_DB_PASSWORD:-}"
+          case "$db_password" in
+            '')
+              echo "error: MAILFLOW_DB_PASSWORD must be set in the production environment" >&2
+              exit 1
+              ;;
+            *$'\n'*|*$'\r'*)
+              echo "error: MAILFLOW_DB_PASSWORD must be a single line" >&2
+              exit 1
+              ;;
+          esac
+          grep -q '^MAILFLOW_DB_PASSWORD=' .env \
+            || { echo "error: .env.example has no MAILFLOW_DB_PASSWORD line" >&2; exit 1; }
+          escaped="$(printf '%s' "$db_password" | sed 's/[&|\\]/\\&/g')"
           sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
           sed -i "s|^MAILFLOW_API_PORT=.*|MAILFLOW_API_PORT=${port}|" .env
+          sed -i "s|^MAILFLOW_DB_PASSWORD=.*|MAILFLOW_DB_PASSWORD=${escaped}|" .env
           chmod 600 .env
 
       - name: check the published port is free
@@ -137,14 +161,18 @@ jobs:
           set -euo pipefail
           # The runner is a container, so its loopback is not the host's. Ask
           # Docker for the container's own health state instead of curling.
-          for _ in $(seq 1 30); do
-            status="$(docker inspect "$APP_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
-            if [ "$status" = "healthy" ]; then
+          # The database must be healthy before the application can be: the
+          # service refuses to start without it.
+          for _ in $(seq 1 45); do
+            db_status="$(docker inspect "$APP_DB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
+            api_status="$(docker inspect "$APP_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
+            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ]; then
               exit 0
             fi
             sleep 2
           done
-          echo "error: $APP_CONTAINER did not become healthy" >&2
+          echo "error: application stack did not become healthy (db=$db_status api=$api_status)" >&2
+          docker logs --tail 50 "$APP_DB_CONTAINER" >&2 || true
           docker logs --tail 50 "$APP_CONTAINER" >&2 || true
           exit 1
 
@@ -165,7 +193,8 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           Application deployed from ${{ github.sha }}
           Image: ${MAILFLOW_IMAGE} (built on the host, arm64)
-          Health: healthy
+          Health: db healthy, api healthy
           API: 127.0.0.1:${MAILFLOW_API_PORT:-8080} (host loopback)
+          Database: mailflow-app-db volume preserved (not published)
           Mail: unchanged — $(cat "$RUNNER_TEMP/mail-before.txt")
           EOF

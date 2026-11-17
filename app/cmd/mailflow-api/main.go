@@ -14,6 +14,7 @@ import (
 	"github.com/X-Ray-X/mailflow/app/internal/config"
 	"github.com/X-Ray-X/mailflow/app/internal/jmap"
 	"github.com/X-Ray-X/mailflow/app/internal/mail"
+	"github.com/X-Ray-X/mailflow/app/internal/store"
 )
 
 func main() {
@@ -42,11 +43,31 @@ func run() error {
 		return err
 	}
 
-	service := mail.NewService(client, cfg.PageSizeDefault, cfg.PageSizeMax, cfg.BodyMaxBytes)
+	// The application database holds idempotency records, never mail. A
+	// failure here stops startup: the service will not send without a record.
+	db, err := store.Open(context.Background(), store.Config{
+		Host:     cfg.DBHost,
+		Port:     cfg.DBPort,
+		Name:     cfg.DBName,
+		User:     cfg.DBUser,
+		Password: cfg.DBPassword,
+		Logger:   log,
+	})
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	service := mail.NewService(client, cfg.PageSizeDefault, cfg.PageSizeMax, cfg.BodyMaxBytes, log)
 	server := api.New(service, api.Options{
-		Timeout:     cfg.RequestTimeout,
-		PageSizeMax: cfg.PageSizeMax,
-		Logger:      log,
+		Timeout:           cfg.RequestTimeout,
+		PageSizeMax:       cfg.PageSizeMax,
+		Logger:            log,
+		Records:           db,
+		IdempotencyTTL:    cfg.IdempotencyTTL,
+		IdempotencyLease:  cfg.IdempotencyLease,
+		SendMaxRecipients: cfg.SendMaxRecipients,
+		SendMaxBytes:      cfg.SendMaxBytes,
 	})
 
 	httpServer := &http.Server{
@@ -62,6 +83,10 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Expired idempotency records are deleted in the background; the sweep
+	// stops with the process.
+	go db.RunJanitor(ctx, 10*time.Minute)
+
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("listening",
@@ -71,6 +96,12 @@ func run() error {
 			"page_size_default", cfg.PageSizeDefault,
 			"page_size_max", cfg.PageSizeMax,
 			"body_max_bytes", cfg.BodyMaxBytes,
+			"db_host", cfg.DBHost,
+			"db_name", cfg.DBName,
+			"idempotency_ttl", cfg.IdempotencyTTL.String(),
+			"idempotency_lease", cfg.IdempotencyLease.String(),
+			"send_max_recipients", cfg.SendMaxRecipients,
+			"send_max_bytes", cfg.SendMaxBytes,
 		)
 		serveErr <- httpServer.ListenAndServe()
 	}()

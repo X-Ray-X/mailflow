@@ -220,6 +220,82 @@ callers. The service refuses a foreign identifier locally, before asking the
 mail server. This is a wrong-answer problem, not a confidentiality problem: no
 probe made another account's content readable.
 
+### Sending and flag updates (probed 2026-11-17)
+
+Exercised with `alice@mailflow.test` on the same pinned release. The account id
+was `c`, the drafts mailbox `d`, and the sent mailbox `e` for this account; as
+the earlier section records, those are per-account and must be looked up by role.
+
+- **`Identity/get` needs the submission capability.** With only `core` and
+  `mail` in `using`, the server answers
+  `{"type":"unknownMethod","description":"Method Identity/get requires capability urn:ietf:params:jmap:submission ..."}`.
+  The account advertises `urn:ietf:params:jmap:submission` and one identity:
+  `{"id":"b","name":"alice@mailflow.test","email":"alice@mailflow.test"}`.
+  Submission uses that identity's `id`; the address must come from here, not
+  from the caller.
+- **Creating a message from parts works.** `Email/set` create with
+  `mailboxIds`, `keywords`, `to`, `subject`, `textBody` as a part with a
+  `partId`, and `bodyValues` returned an id, blob id, thread id, and size. No
+  MIME construction or upload is involved.
+- **Create and submit can share one envelope** with a back-reference:
+  `"emailId": "#p1"` refers to the create with client id `p1`.
+  `onSuccessUpdateEmail` with `{"#s1": {...}}` applies to the submission.
+- **A submission without `onSuccessUpdateEmail` leaves the message in Drafts.**
+  The created email still had `mailboxIds: {"d": true}` and `keywords:
+  {"$draft": true, "$seen": true}` after the submission succeeded. The success
+  update is therefore required, not a convenience:
+
+```json
+["EmailSubmission/set", {
+  "accountId": "c",
+  "create": {"s1": {
+    "identityId": "b",
+    "emailId": "#p1",
+    "envelope": {
+      "mailFrom": {"email": "alice@mailflow.test"},
+      "rcptTo": [{"email": "bob@mailflow.test"}]
+    }
+  }},
+  "onSuccessUpdateEmail": {"#s1": {
+    "mailboxIds/d": null,
+    "mailboxIds/e": true,
+    "keywords/$seen": true,
+    "keywords/$draft": null
+  }}
+}, "c2"]
+```
+
+The response contained three method responses in order: the `Email/set` create
+(`created.p1.id`), the `EmailSubmission/set` create (`created.s1.id`,
+`undoStatus: "pending"`), and an `Email/set` update for the same email. A
+subsequent `Email/get` showed the message in `{"e": true}` with
+`keywords: {"$hasnoattachment": true, "$seen": true}` — out of Drafts, draft
+cleared, and read. `$hasnoattachment` is a vendor keyword and must not reach a
+public payload.
+- **Per-keyword patches work and preserve unrelated keywords.** Patching
+  `{"update":{"eaaaaab":{"keywords/$seen":false}}}` removed `$seen` and left
+  `$hasattachment: true` in place. Setting the key to `false` is how a keyword
+  is cleared; the map only lists keywords that are set. A full-map replacement
+  is therefore unnecessary and would be destructive.
+- **A refused submission is `notCreated`, not a method error.** Submitting an
+  envelope whose recipient was `nobody@example.invalid` answered:
+
+```json
+{"notCreated": {"s1": {
+  "type": "invalidProperties",
+  "description": "Invalid e-mail address \"nobody@example.invalid\".",
+  "properties": ["envelope"]
+}}}
+```
+
+The description names the address and is vendor text; the service maps this to
+its own rejection without copying it.
+- **Destroying a just-created message works**, which makes compensating a failed
+  submission feasible: `Email/set` destroy returned the id in `destroyed`.
+- **`undoStatus: "pending"` is not used.** A submission can be undone in a short
+  window after acceptance; the service treats acceptance as final and does not
+  expose or call undo.
+
 ## Push notifications
 
 `eventSourceUrl` is a template with three parameters:
@@ -267,9 +343,10 @@ Recorded as gaps, not as behavior:
   this release is unrecorded.
 - **Calendars, contacts, Sieve, vacation response, quota, metadata, filenode,
   principals** are advertised and untouched. Mailflow does not need them.
-- **`Email/set`, `Email/import`, `EmailSubmission/set`** were not exercised. The
-  Go service's eventual write path must be designed against a later check, not
-  against an assumption that these work as the RFC describes.
+- **`Email/import`** was not exercised. The service creates messages from parts
+  instead, so no upload or MIME construction path exists.
+- **`EmailSubmission/get` and `EmailSubmission/changes`** were not called; only
+  `set` was exercised, and the service does not need to read submission state.
 - **`Email/changes`, `Mailbox/changes`** were not called; the state strings were
   only observed, not followed.
 
