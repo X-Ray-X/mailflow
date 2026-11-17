@@ -376,11 +376,18 @@ internal identifier is identical in both accounts. It also scans every response
 it received for vendor vocabulary. It is not part of `verify.sh`, because the
 application is a separate deployment unit.
 
+On the homelab host the service is deployed by `deploy-app.yml` and published on
+`127.0.0.1:8081`, the value of `MAILFLOW_API_PORT` in the `production`
+environment. `curl http://127.0.0.1:8081/healthz` returns `{"status":"ok"}`.
+The host deploy checks health and that the mail container is unchanged; the full
+read path above is exercised locally, not against the host.
+
 ### Spec scenario coverage
 
-Status of every scenario in the change's two specs. "Protocol client" means the
-stdlib IMAP/SMTP client in `scripts/verify.py`, which is a real client of both
-protocols. Desktop results are from Thunderbird on macOS.
+Status of every scenario in the `mail-infrastructure` and `mailbox-access`
+specs. "Protocol client" means the stdlib IMAP/SMTP client in
+`scripts/verify.py`, which is a real client of both protocols. Desktop results
+are from Thunderbird on macOS.
 
 | Spec | Scenario | Status |
 |---|---|---|
@@ -434,17 +441,23 @@ An application deploy therefore neither recreates the mail container nor touches
 its data. The application project shares only the mail network and a copy of the
 CA; it mounts no mail path.
 
+The same check runs on the homelab host in `deploy-app.yml`. In the third run
+(merge `3328b76`, image `mailflow-api:3328b769a0ce`) the mail container's id,
+start time, and image were identical before and after, and the run summary
+records the mail as unchanged.
+
 ### Remaining verification gaps
 
 | Gap | Cause |
 |---|---|
-| The read contract on the homelab host | Not yet served. The first `deploy-app.yml` run on `main` (merge `4badccf`) failed before the container started: `127.0.0.1:8080` is published by an unrelated nginx container on the host. The mail project's setup listener is on 8089, not 8080. The workflow now takes `MAILFLOW_API_PORT` from the production environment (`8081`) and fails early, naming it, when another container publishes the port. The second run (merge `2d5e3be`) passed that check and started the container, but health failed: the CA bind mount resolved to a directory because the runner's checkout is not visible to the host Docker daemon. The CA now lives in an app-owned volume (`mailflow-app-ca`), streamed through the daemon at deploy time. A passing run is still pending |
 | Mobile client against the API | Descoped by decision; there is no mobile client |
 
-The merge-triggered `deploy.yml` run on the same commit reported
-`Container mailflow-stalwart Running`; it did not recreate the mail container.
-The application run's own mail-unchanged step did not execute, because the
-deployment failed at the port before reaching it.
+The third application run on `main` passed: the container became healthy, the
+mail-unchanged step ran and passed, and on the host
+`curl http://127.0.0.1:8081/healthz` returned `{"status":"ok"}` with the
+container published on `127.0.0.1:8081->8080`. The merge-triggered `deploy.yml`
+run on the same commit reported `Container mailflow-stalwart Running`; it did
+not recreate the mail container.
 
 ## Backup and restore
 
