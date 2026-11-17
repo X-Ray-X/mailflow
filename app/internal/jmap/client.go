@@ -25,8 +25,9 @@ import (
 
 // JMAP capabilities the service uses.
 const (
-	CapabilityCore = "urn:ietf:params:jmap:core"
-	CapabilityMail = "urn:ietf:params:jmap:mail"
+	CapabilityCore       = "urn:ietf:params:jmap:core"
+	CapabilityMail       = "urn:ietf:params:jmap:mail"
+	CapabilitySubmission = "urn:ietf:params:jmap:submission"
 )
 
 // Errors are the only failure classes this package exposes. Callers map them
@@ -37,7 +38,11 @@ var (
 	ErrUnavailable    = errors.New("mail server unavailable")
 	ErrTimeout        = errors.New("mail server did not answer in time")
 	ErrUpstream       = errors.New("mail server rejected the request")
+	ErrNotFound       = errors.New("mail server has no such object")
 	ErrAnchorNotFound = errors.New("anchor not found in query results")
+	// ErrRejected means the server declined the message itself. Retrying the
+	// same input cannot succeed, which is why it is not an outage.
+	ErrRejected = errors.New("mail server declined the message")
 )
 
 // Credentials are forwarded from the caller. They are never stored.
@@ -140,12 +145,59 @@ func (c *Client) FetchSession(ctx context.Context, creds Credentials) (Session, 
 
 // Call sends one method call and returns its arguments.
 func (c *Client) Call(ctx context.Context, creds Credentials, method string, args any) (json.RawMessage, error) {
+	results, err := c.Batch(ctx, creds, []Call{{Method: method, Args: args, ClientID: "c"}})
+	if err != nil {
+		return nil, err
+	}
+	if len(results) != 1 {
+		return nil, fmt.Errorf("%w: %s returned %d responses", ErrUpstream, method, len(results))
+	}
+	result := results[0]
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	if result.Method != method {
+		return nil, fmt.Errorf("%w: asked for %s, got %s", ErrUpstream, method, result.Method)
+	}
+	return result.Args, nil
+}
+
+// Call is one method call in a batch.
+type Call struct {
+	Method   string
+	Args     any
+	ClientID string
+}
+
+// Result is one method response. Err is set when the server answered with a
+// method error. A batch can contain more results than calls: a successful
+// submission's onSuccessUpdateEmail produces an extra Email/set response with
+// the submission's client id, so callers match results by method and client id
+// rather than by position alone.
+type Result struct {
+	Method   string
+	ClientID string
+	Args     json.RawMessage
+	Err      error
+}
+
+// Batch sends several method calls in one envelope and returns every response
+// in order. The error is for a failed exchange (transport, HTTP status, or a
+// malformed envelope); individual method failures are on each Result.
+func (c *Client) Batch(ctx context.Context, creds Credentials, calls []Call) ([]Result, error) {
+	if len(calls) == 0 {
+		return nil, errors.New("empty JMAP batch")
+	}
+	methodCalls := make([][]any, 0, len(calls))
+	for _, call := range calls {
+		methodCalls = append(methodCalls, []any{call.Method, call.Args, call.ClientID})
+	}
 	payload, err := json.Marshal(map[string]any{
-		"using":       []string{CapabilityCore, CapabilityMail},
-		"methodCalls": [][]any{{method, args, "c"}},
+		"using":       []string{CapabilityCore, CapabilityMail, CapabilitySubmission},
+		"methodCalls": methodCalls,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("encode %s request: %w", method, err)
+		return nil, fmt.Errorf("encode JMAP request: %w", err)
 	}
 
 	status, body, err := c.do(ctx, creds, http.MethodPost, c.apiURL, payload)
@@ -160,29 +212,34 @@ func (c *Client) Call(ctx context.Context, creds Credentials, method string, arg
 		MethodResponses [][]json.RawMessage `json:"methodResponses"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("%w: decode %s response: %v", ErrUpstream, method, err)
+		return nil, fmt.Errorf("%w: decode response: %v", ErrUpstream, err)
 	}
-	if len(envelope.MethodResponses) != 1 {
-		return nil, fmt.Errorf("%w: %s returned %d responses", ErrUpstream, method, len(envelope.MethodResponses))
-	}
-	// A method response is a [name, arguments, clientId] triple. A short one is a
-	// malformed upstream answer, not something to index into and panic on.
-	response := envelope.MethodResponses[0]
-	if len(response) < 2 {
-		return nil, fmt.Errorf("%w: %s returned a malformed response", ErrUpstream, method)
+	if len(envelope.MethodResponses) == 0 {
+		return nil, fmt.Errorf("%w: response carried no method responses", ErrUpstream)
 	}
 
-	var name string
-	if err := json.Unmarshal(response[0], &name); err != nil {
-		return nil, fmt.Errorf("%w: decode %s response name: %v", ErrUpstream, method, err)
+	results := make([]Result, 0, len(envelope.MethodResponses))
+	for _, response := range envelope.MethodResponses {
+		// A method response is a [name, arguments, clientId] triple. A short one
+		// is a malformed upstream answer, not something to index into and panic
+		// on.
+		if len(response) < 2 {
+			return nil, fmt.Errorf("%w: response is malformed", ErrUpstream)
+		}
+		var name, clientID string
+		if err := json.Unmarshal(response[0], &name); err != nil {
+			return nil, fmt.Errorf("%w: decode response name: %v", ErrUpstream, err)
+		}
+		if len(response) > 2 {
+			_ = json.Unmarshal(response[2], &clientID)
+		}
+		result := Result{Method: name, ClientID: clientID, Args: response[1]}
+		if name == "error" {
+			result.Err = methodError(response[1])
+		}
+		results = append(results, result)
 	}
-	if name == "error" {
-		return nil, methodError(response[1])
-	}
-	if name != method {
-		return nil, fmt.Errorf("%w: asked for %s, got %s", ErrUpstream, method, name)
-	}
-	return response[1], nil
+	return results, nil
 }
 
 // methodError maps a JMAP method error without keeping its description.
@@ -194,6 +251,8 @@ func methodError(raw json.RawMessage) error {
 	switch e.Type {
 	case "anchorNotFound":
 		return ErrAnchorNotFound
+	case "notFound":
+		return ErrNotFound
 	case "forbidden", "accountNotFound":
 		return ErrUnauthorized
 	default:

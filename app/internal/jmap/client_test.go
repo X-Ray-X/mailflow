@@ -250,7 +250,7 @@ func TestCallForwardsCredentialsAndMethod(t *testing.T) {
 	if err := json.Unmarshal(body, &sent); err != nil {
 		t.Fatalf("decode request body: %v", err)
 	}
-	if len(sent.Using) != 2 || sent.Using[1] != CapabilityMail {
+	if len(sent.Using) != 3 || sent.Using[1] != CapabilityMail || sent.Using[2] != CapabilitySubmission {
 		t.Fatalf("using = %v", sent.Using)
 	}
 	if len(sent.MethodCalls) != 1 || len(sent.MethodCalls[0]) != 3 {

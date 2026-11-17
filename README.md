@@ -30,6 +30,7 @@ The `production` GitHub Environment must contain (values never committed):
 | `MAIL_BOOTSTRAP_PASSWORD` | bootstrap credential used by the first start only |
 | `MAIL_ACCOUNT_ALICE_PASSWORD` | demo account alice |
 | `MAIL_ACCOUNT_BOB_PASSWORD` | demo account bob |
+| `MAILFLOW_DB_PASSWORD` | application database password, written into the generated app `.env` |
 
 Both demo accounts (`alice`/`bob`) exist so mail can be sent between local
 accounts and exercised against the mailbox-access specs; they are also the
@@ -42,8 +43,9 @@ The same environment also holds two variables, used by the mail deploy:
 | `MAIL_DATA_DIR` | absolute host path for the mail data directory |
 | `MAIL_TAILNET_IP` | optional host tailnet address, printed in the run summary |
 
-The application deploy needs no secret: it builds its image on the host and
-tags it by commit.
+The application deploy builds its image on the host and tags it by commit. It
+reads `MAILFLOW_DB_PASSWORD` from the same environment; the mail and application
+units still share no container, volume, or configuration file.
 
 ### Verify after a deployment
 
@@ -79,15 +81,16 @@ of the project is the service boundary — the mail server is replaceable, and
 application deployments never recreate, upgrade, or reset mail infrastructure.
 
 Current state: the mail infrastructure is deployed and verified. The Go service
-publishes the read contract (mailboxes, message list, message content); sending
-and flag changes are the next change.
+publishes the read contract (mailboxes, message list, message content) and the
+first writes: sending a plain-text message and setting a message's read and
+starred flags. Mailbox changes, attachments, search, and push are later changes.
 
 ## Layout
 
 ```
-app/                Go service: read contract, mail adapter, tests
+app/                Go service: contract, mail adapter, application database, tests
 deploy/mail/        mail infrastructure Compose project (Stalwart, pinned)
-deploy/app/         application Compose project (service only)
+deploy/app/         application Compose project (service and its PostgreSQL database)
 docs/               operational and integration documentation
 openspec/specs/     current behavior, authoritative
 openspec/changes/   work in flight, with tasks and design
@@ -121,11 +124,17 @@ network because a container cannot reach the host's loopback.
 
 ```sh
 docker buildx build --platform linux/arm64 -t mailflow-api:dev app/
-mkdir -p deploy/app/certs
-docker cp mailflow-stalwart:/etc/stalwart/tls/ca.pem deploy/app/certs/ca.pem
+
+# A copy of the mail CA in an app-owned volume. Never mount the mail data
+# directory: the deployment units share traffic, not files.
+docker volume create mailflow-app-ca >/dev/null
+docker cp mailflow-stalwart:/etc/stalwart/tls/ca.pem - \
+  | docker run --rm --user 0 -i -v mailflow-app-ca:/certs \
+      --entrypoint sh mailflow-api:dev \
+      -c 'tar -xf - -C /certs && chmod 644 /certs/ca.pem'
 
 cd deploy/app
-cp .env.example .env
+cp .env.example .env      # set MAILFLOW_DB_PASSWORD for local use
 docker compose up -d
 ```
 
@@ -133,6 +142,11 @@ docker compose up -d
 |---|---|
 | Mailflow API, loopback only | `http://127.0.0.1:8080/v1/` |
 | Health | `http://127.0.0.1:8080/healthz` |
+| PostgreSQL | private to the app Compose project, no published port |
+
+The database holds idempotency records for sending; it never holds mail. Its
+volume (`mailflow-app-db`) survives an application deploy or restart and is
+deleted only by an explicit `docker compose down --volumes`.
 
 If host port 8080 is already taken, set `MAILFLOW_API_PORT` in the repository's
 `production` environment to a free loopback port. The homelab host publishes the
@@ -146,14 +160,16 @@ checkout would not survive. The contract, configuration, and examples are in
 ```
 
 exercises the contract against a running instance: paging, body content,
-cross-account refusal, malformed input, and a vendor-vocabulary scan.
+cross-account refusal, malformed input, sending and replay, flag updates, and a
+vendor-vocabulary scan over reads and writes.
 
 Clients must resolve `mail.mailflow.test` to the host and trust the internal CA
 at `deploy/mail/data/tls/ca.pem`. Do not disable certificate verification.
 
 - Day-to-day operation, TLS, backup/restore, upgrade: [`docs/mail-infrastructure.md`](docs/mail-infrastructure.md)
 - Observed JMAP surface, capabilities, events: [`docs/integration-surface.md`](docs/integration-surface.md)
-- Published read contract, configuration, run recipe: [`docs/api.md`](docs/api.md)
+- Published contract, configuration, run recipe: [`docs/api.md`](docs/api.md)
+- Application database, pin, backup/restore, retention: [`docs/application-database.md`](docs/application-database.md)
 
 ## Specifications
 

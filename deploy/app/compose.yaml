@@ -28,6 +28,17 @@ services:
       MAILFLOW_PAGE_SIZE_DEFAULT: ${MAILFLOW_PAGE_SIZE_DEFAULT:-25}
       MAILFLOW_PAGE_SIZE_MAX: ${MAILFLOW_PAGE_SIZE_MAX:-100}
       MAILFLOW_BODY_MAX_BYTES: ${MAILFLOW_BODY_MAX_BYTES:-262144}
+      # Application state: idempotency records. Resolved by Compose DNS on the
+      # private data network; the password comes from the generated .env.
+      MAILFLOW_DB_HOST: db
+      MAILFLOW_DB_PORT: "5432"
+      MAILFLOW_DB_NAME: ${MAILFLOW_DB_NAME:-mailflow}
+      MAILFLOW_DB_USER: ${MAILFLOW_DB_USER:-mailflow}
+      MAILFLOW_DB_PASSWORD: ${MAILFLOW_DB_PASSWORD:?MAILFLOW_DB_PASSWORD must be set}
+      MAILFLOW_IDEMPOTENCY_TTL: ${MAILFLOW_IDEMPOTENCY_TTL:-24h}
+      MAILFLOW_IDEMPOTENCY_LEASE: ${MAILFLOW_IDEMPOTENCY_LEASE:-2m}
+      MAILFLOW_SEND_MAX_RECIPIENTS: ${MAILFLOW_SEND_MAX_RECIPIENTS:-50}
+      MAILFLOW_SEND_MAX_BYTES: ${MAILFLOW_SEND_MAX_BYTES:-262144}
 
     ports:
       # Host loopback only. Widening this belongs to the change that adds a
@@ -42,8 +53,52 @@ services:
       # never mounted here.
       - ca:/etc/mailflow:ro
 
+    depends_on:
+      db:
+        condition: service_healthy
+
     networks:
       - mail
+      - data
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    # Pinned by exact release; the digest is recorded in
+    # docs/application-database.md. PostgreSQL owns Mailflow application state
+    # only, never mailbox contents.
+    image: ${MAILFLOW_DB_IMAGE:?MAILFLOW_DB_IMAGE must be set}
+    container_name: mailflow-db
+    init: true
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: ${MAILFLOW_DB_NAME:-mailflow}
+      POSTGRES_USER: ${MAILFLOW_DB_USER:-mailflow}
+      POSTGRES_PASSWORD: ${MAILFLOW_DB_PASSWORD:?MAILFLOW_DB_PASSWORD must be set}
+
+    volumes:
+      # The pinned image declares /var/lib/postgresql as its volume and keeps
+      # PGDATA below it. Application-owned, so an application deploy can never
+      # remove mailbox state and a mail deploy can never see it.
+      - db:/var/lib/postgresql
+
+    # No ports: the database is reachable only from the application's private
+    # data network.
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+    networks:
+      - data
 
     logging:
       driver: json-file
@@ -58,8 +113,17 @@ volumes:
   ca:
     name: mailflow-app-ca
     external: true
+  # Application state only. Compose creates it on first start and never removes
+  # it on `up --remove-orphans`; only an explicit `down --volumes` would.
+  db:
+    name: mailflow-app-db
 
 networks:
   mail:
     external: true
     name: ${MAILFLOW_MAIL_NETWORK:-mailflow-mail_default}
+  # Private to the application project: the database has no route off this
+  # network, and nothing in the mail project joins it.
+  data:
+    name: mailflow-app-data
+    internal: true

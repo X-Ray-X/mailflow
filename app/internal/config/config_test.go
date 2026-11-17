@@ -25,6 +25,7 @@ func validEnv(t *testing.T) map[string]string {
 		EnvJMAPURL:      "https://mail.example.test/jmap/",
 		EnvJMAPHostname: "mail.example.test",
 		EnvCAFile:       ca,
+		EnvDBPassword:   "local-test-password",
 	}
 }
 
@@ -55,6 +56,33 @@ func TestLoadDefaults(t *testing.T) {
 	if got, want := cfg.BodyMaxBytes, int64(DefaultBodyMaxBytes); got != want {
 		t.Errorf("BodyMaxBytes = %d, want %d", got, want)
 	}
+	if got, want := cfg.DBHost, DefaultDBHost; got != want {
+		t.Errorf("DBHost = %q, want %q", got, want)
+	}
+	if got, want := cfg.DBPort, DefaultDBPort; got != want {
+		t.Errorf("DBPort = %d, want %d", got, want)
+	}
+	if got, want := cfg.DBName, DefaultDBName; got != want {
+		t.Errorf("DBName = %q, want %q", got, want)
+	}
+	if got, want := cfg.DBUser, DefaultDBUser; got != want {
+		t.Errorf("DBUser = %q, want %q", got, want)
+	}
+	if got, want := cfg.DBPassword, "local-test-password"; got != want {
+		t.Errorf("DBPassword = %q, want %q", got, want)
+	}
+	if got, want := cfg.IdempotencyTTL, DefaultIdempotencyTTL; got != want {
+		t.Errorf("IdempotencyTTL = %v, want %v", got, want)
+	}
+	if got, want := cfg.IdempotencyLease, DefaultIdempotencyLease; got != want {
+		t.Errorf("IdempotencyLease = %v, want %v", got, want)
+	}
+	if got, want := cfg.SendMaxRecipients, DefaultSendMaxRecipients; got != want {
+		t.Errorf("SendMaxRecipients = %d, want %d", got, want)
+	}
+	if got, want := cfg.SendMaxBytes, int64(DefaultSendMaxBytes); got != want {
+		t.Errorf("SendMaxBytes = %d, want %d", got, want)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -66,6 +94,15 @@ func TestLoadOverrides(t *testing.T) {
 	env[EnvPageSizeDefault] = "10"
 	env[EnvPageSizeMax] = "50"
 	env[EnvBodyMaxBytes] = "1024"
+	env[EnvDBHost] = "postgres.internal"
+	env[EnvDBPort] = "6543"
+	env[EnvDBName] = "mailflow_state"
+	env[EnvDBUser] = "mailflow_app"
+	env[EnvDBPassword] = "p@ss&word|with\\odd-characters"
+	env[EnvIdempotencyTTL] = "48h"
+	env[EnvIdempotencyLease] = "5m"
+	env[EnvSendMaxRecipients] = "10"
+	env[EnvSendMaxBytes] = "4096"
 
 	cfg, err := Load(lookup(env))
 	if err != nil {
@@ -88,6 +125,33 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if got, want := cfg.BodyMaxBytes, int64(1024); got != want {
 		t.Errorf("BodyMaxBytes = %d, want %d", got, want)
+	}
+	if got, want := cfg.DBHost, "postgres.internal"; got != want {
+		t.Errorf("DBHost = %q, want %q", got, want)
+	}
+	if got, want := cfg.DBPort, 6543; got != want {
+		t.Errorf("DBPort = %d, want %d", got, want)
+	}
+	if got, want := cfg.DBName, "mailflow_state"; got != want {
+		t.Errorf("DBName = %q, want %q", got, want)
+	}
+	if got, want := cfg.DBUser, "mailflow_app"; got != want {
+		t.Errorf("DBUser = %q, want %q", got, want)
+	}
+	if got, want := cfg.DBPassword, "p@ss&word|with\\odd-characters"; got != want {
+		t.Errorf("DBPassword = %q, want the value verbatim", got)
+	}
+	if got, want := cfg.IdempotencyTTL, 48*time.Hour; got != want {
+		t.Errorf("IdempotencyTTL = %v, want %v", got, want)
+	}
+	if got, want := cfg.IdempotencyLease, 5*time.Minute; got != want {
+		t.Errorf("IdempotencyLease = %v, want %v", got, want)
+	}
+	if got, want := cfg.SendMaxRecipients, 10; got != want {
+		t.Errorf("SendMaxRecipients = %d, want %d", got, want)
+	}
+	if got, want := cfg.SendMaxBytes, int64(4096); got != want {
+		t.Errorf("SendMaxBytes = %d, want %d", got, want)
 	}
 }
 
@@ -209,6 +273,59 @@ func TestLoadRejects(t *testing.T) {
 			mutate: func(_ *testing.T, env map[string]string) { env[EnvBodyMaxBytes] = "-1" },
 			want:   "must be positive",
 		},
+		{
+			name:   "missing database password",
+			mutate: func(_ *testing.T, env map[string]string) { delete(env, EnvDBPassword) },
+			want:   EnvDBPassword + ": required",
+		},
+		{
+			name:   "database host carries a port",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvDBHost] = "db:5432" },
+			want:   EnvDBHost + ":",
+		},
+		{
+			name:   "database host is a URL",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvDBHost] = "postgres://db" },
+			want:   EnvDBHost + ":",
+		},
+		{
+			name:   "database port is not a number",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvDBPort] = "five" },
+			want:   EnvDBPort + ": not an integer",
+		},
+		{
+			name:   "database port is out of range",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvDBPort] = "70000" },
+			want:   EnvDBPort + ": must be 1-65535",
+		},
+		{
+			name:   "database name carries whitespace",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvDBName] = "mail flow" },
+			want:   EnvDBName + ": must not contain",
+		},
+		{
+			name:   "idempotency lease is shorter than the request timeout",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvIdempotencyLease] = "5s" },
+			want:   EnvIdempotencyLease + ":",
+		},
+		{
+			name: "idempotency retention is shorter than the lease",
+			mutate: func(_ *testing.T, env map[string]string) {
+				env[EnvIdempotencyLease] = "10m"
+				env[EnvIdempotencyTTL] = "5m"
+			},
+			want: EnvIdempotencyTTL + ":",
+		},
+		{
+			name:   "send recipient cap is not a number",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvSendMaxRecipients] = "many" },
+			want:   EnvSendMaxRecipients + ": not an integer",
+		},
+		{
+			name:   "send body cap exceeds the hard limit",
+			mutate: func(_ *testing.T, env map[string]string) { env[EnvSendMaxBytes] = "999999999" },
+			want:   EnvSendMaxBytes + ": must be between",
+		},
 	}
 
 	for _, tc := range cases {
@@ -231,7 +348,7 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load succeeded with an empty environment")
 	}
-	for _, name := range []string{EnvJMAPURL, EnvJMAPHostname, EnvCAFile} {
+	for _, name := range []string{EnvJMAPURL, EnvJMAPHostname, EnvCAFile, EnvDBPassword} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error does not name %s: %v", name, err)
 		}

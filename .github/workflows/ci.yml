@@ -57,36 +57,34 @@ jobs:
       - name: compose config
         run: docker compose -f deploy/mail/compose.yaml --env-file deploy/mail/.env.example config
 
-      # Gate 2 — the application is its own project. It must render with one
-      # service, publish on loopback only, and share nothing with the mail
-      # deployment except a copy of the CA. The CA is a named volume, not a bind
-      # mount: the deploy streams it through the Docker daemon, because the
-      # runner's checkout is not a path the host daemon can resolve. This job
-      # name predates the application unit; both gates live here so one required
-      # check covers every Compose project in the repository.
+      # Gate 2 — the application is its own project. It must render with the
+      # service and its database, publish only the service on loopback, and
+      # share nothing with the mail deployment except a copy of the CA. The CA
+      # is a named volume, not a bind mount: the deploy streams it through the
+      # Docker daemon, because the runner's checkout is not a path the host
+      # daemon can resolve. This job name predates the application unit; both
+      # gates live here so one required check covers every Compose project in
+      # the repository.
       - name: application compose is a separate project
         run: |
           cd deploy/app
           env_file=.env.example
 
-          services="$(docker compose --env-file "$env_file" config --services)"
-          test "$services" = "api" \
-            || { echo "application compose must contain only the api service, found: $services"; exit 1; }
-
           # one service, loopback-only ports, no bind mounts, and the CA in the
-          # app-owned volume the deploy refills. The mail data directory must
-          # never appear.
+          # app-owned volume the deploy refills. The database keeps application
+          # state in an app-owned volume and publishes nothing. The mail data
+          # directory must never appear.
           docker compose --env-file "$env_file" config --format json \
             | python3 -c '
           import json, sys
 
           c = json.load(sys.stdin)
           services = c["services"]
-          assert list(services) == ["api"], list(services)
-          api = services["api"]
+          assert set(services) == {"api", "db"}, sorted(services)
+          api, db = services["api"], services["db"]
 
-          ports = api.get("ports") or []
-          assert ports and all(p.get("host_ip") == "127.0.0.1" for p in ports), ports
+          api_ports = api.get("ports") or []
+          assert api_ports and all(p.get("host_ip") == "127.0.0.1" for p in api_ports), api_ports
 
           mounts = api.get("volumes") or []
           binds = [m for m in mounts if m.get("type") == "bind"]
@@ -98,6 +96,24 @@ jobs:
           assert mount.get("target") == "/etc/mailflow", mount
           assert mount.get("read_only") is True, mount
 
+          # The database is private: no host port, no bind mount, and its data in
+          # a named application volume rather than a host path.
+          assert not (db.get("ports") or []), db.get("ports")
+          db_mounts = db.get("volumes") or []
+          assert not [m for m in db_mounts if m.get("type") == "bind"], db_mounts
+          db_volume = [m for m in db_mounts if m.get("type") == "volume"]
+          assert len(db_volume) == 1, db_volume
+          assert db_volume[0].get("source") == "db", db_volume[0]
+          assert db_volume[0].get("target") == "/var/lib/postgresql", db_volume[0]
+
+          image = db.get("image", "")
+          assert image.startswith("postgres:"), image
+          assert not image.endswith(":latest"), image
+
+          data = c["networks"]["data"]
+          assert data.get("internal") is True, data
+          assert data.get("name") == "mailflow-app-data", data
+
           net = c["networks"]["mail"]
           assert net.get("external") is True, net
           assert net.get("name") == "mailflow-mail_default", net
@@ -106,7 +122,10 @@ jobs:
           assert volume.get("external") is True, volume
           assert volume.get("name") == "mailflow-app-ca", volume
 
-          print("application compose is separate and loopback-only")
+          state = c["volumes"]["db"]
+          assert state.get("name") == "mailflow-app-db", state
+
+          print("application compose is separate, loopback-only, and stateful")
           '
 
           if docker compose --env-file "$env_file" config | grep -q "deploy/mail"; then
