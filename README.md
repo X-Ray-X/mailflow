@@ -135,7 +135,8 @@ docker compose up -d
 | Health | `http://127.0.0.1:8080/healthz` |
 
 If host port 8080 is already taken, set `MAILFLOW_API_PORT` in the repository's
-`production` environment to a free loopback port. The deploy workflow generates
+`production` environment to a free loopback port. The homelab host publishes the
+API on `127.0.0.1:8081` for that reason. The deploy workflow generates
 `deploy/app/.env` from the example on every run, so a value edited in the
 checkout would not survive. The contract, configuration, and examples are in
 [`docs/api.md`](docs/api.md).

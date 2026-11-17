@@ -3,7 +3,7 @@ name: Deploy application
 # The application deployment unit. It never references the mail project's
 # containers, volumes, or configuration: an application deploy cannot recreate,
 # upgrade, or reset the mail infrastructure. See
-# openspec/changes/mailflow-service-read-api/design.md.
+# openspec/changes/archive/2026-11-16-mailflow-service-read-api/design.md.
 
 on:
   push:

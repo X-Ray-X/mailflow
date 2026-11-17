@@ -3,7 +3,7 @@ name: mailflow-app
 # The application deployment unit. It is a Compose project of its own so that
 # deploying, restarting, or rolling it back can never recreate, upgrade, or
 # reset the mail infrastructure. See
-# openspec/changes/mailflow-service-read-api/design.md.
+# openspec/changes/archive/2026-11-16-mailflow-service-read-api/design.md.
 #
 # It joins the mail project's network because a container cannot reach the
 # host's loopback, where the mail HTTPS listener is published. It shares no
