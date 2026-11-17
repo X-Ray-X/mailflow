@@ -89,10 +89,20 @@ jobs:
           # would otherwise surface as a failed start after a container was
           # created. Name the variable the operator has to change. Match every
           # host binding Docker reports, not just the loopback one.
-          if docker ps --format '{{.Ports}}' | grep -Eq "(^|[ ,])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->"; then
+          #
+          # The application's own container may already hold the port from the
+          # previous deploy. This run replaces it, so it is not a conflict:
+          # exclude anything from the app Compose project or named as the app
+          # container before looking for a collision.
+          others="$(docker ps --format '{{.Label "com.docker.compose.project"}}|{{.Names}}|{{.Ports}}' \
+            | awk -F'|' -v project="mailflow-app" -v app="$APP_CONTAINER" \
+                '$1 == project || $2 == app { next } { print }')"
+          if printf '%s\n' "$others" \
+            | grep -Eq "(^|[ ,|])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->"; then
             echo "error: 127.0.0.1:${port} is already published by another container" >&2
             echo "set MAILFLOW_API_PORT in the production environment to a free loopback port" >&2
-            docker ps --format '{{.Names}} {{.Ports}}' >&2
+            printf '%s\n' "$others" \
+              | grep -E "(^|[ ,|])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->" >&2 || true
             exit 1
           fi
 

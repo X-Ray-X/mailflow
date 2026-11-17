@@ -88,7 +88,8 @@ every run. Set the published port as `MAILFLOW_API_PORT` in the repository's
 `production` environment (default 8080); a value edited in the checkout does not
 survive, because the checkout is cleaned. If another container already publishes
 the port, the workflow fails before creating the application container and names
-the variable to change.
+the variable to change. The application's own container from the previous deploy
+does not count: that run replaces it.
 
 Stop it with `docker rm -f mailflow-api`. That touches nothing in the mail
 project.
