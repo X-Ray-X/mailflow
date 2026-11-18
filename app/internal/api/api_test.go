@@ -39,6 +39,8 @@ type fakeReader struct {
 	createDraftFn func(context.Context, mail.Draft) (string, error)
 	sendDraftFn   func(context.Context, string) (string, error)
 	replyFn       func(context.Context, string, string) (string, error)
+	attachmentsFn func(context.Context, string) ([]mail.Attachment, error)
+	downloadFn    func(context.Context, string, int) (mail.AttachmentDownload, error)
 	updateFn      func(context.Context, string, mail.MessagePatch) (mail.MessageSummary, error)
 	deleteMsgFn   func(context.Context, string) error
 
@@ -50,6 +52,7 @@ type fakeReader struct {
 	gotDraft       mail.Draft
 	gotDraftID     string
 	gotReplyText   string
+	gotPosition    int
 	gotMessageID   string
 	gotPatch       mail.MessagePatch
 	gotMailboxID   string
@@ -142,6 +145,29 @@ func (f *fakeReader) Reply(ctx context.Context, creds mail.Credentials, messageI
 		return f.replyFn(ctx, messageID, text)
 	}
 	return "", nil
+}
+
+func (f *fakeReader) Attachments(ctx context.Context, creds mail.Credentials, messageID string) ([]mail.Attachment, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMessageID = messageID
+	f.mu.Unlock()
+	if f.attachmentsFn != nil {
+		return f.attachmentsFn(ctx, messageID)
+	}
+	return nil, nil
+}
+
+func (f *fakeReader) DownloadAttachment(ctx context.Context, creds mail.Credentials, messageID string, position int) (mail.AttachmentDownload, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMessageID = messageID
+	f.gotPosition = position
+	f.mu.Unlock()
+	if f.downloadFn != nil {
+		return f.downloadFn(ctx, messageID, position)
+	}
+	return mail.AttachmentDownload{}, nil
 }
 
 func (f *fakeReader) UpdateMessage(ctx context.Context, creds mail.Credentials, messageID string, patch mail.MessagePatch) (mail.MessageSummary, error) {
@@ -1745,5 +1771,192 @@ func TestReplyRequiresPost(t *testing.T) {
 	resp := request(t, srv, http.MethodGet, "/v1/messages/msg1/reply", &testCreds)
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestAttachmentsListsMetadata(t *testing.T) {
+	f := &fakeReader{attachmentsFn: func(context.Context, string) ([]mail.Attachment, error) {
+		return []mail.Attachment{
+			{Position: 0, Filename: "first.txt", ContentType: "text/plain", Size: 16},
+			{Position: 1, Filename: "second.bin", ContentType: "application/octet-stream", Size: 17},
+		}, nil
+	}}
+	srv := newTestServer(t, f, Options{})
+
+	resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments", &testCreds)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body(t, resp))
+	}
+	var got attachmentsResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Attachments) != 2 || got.Attachments[0].Position != 0 ||
+		got.Attachments[0].Filename != "first.txt" || got.Attachments[0].ContentType != "text/plain" ||
+		got.Attachments[0].Size != 16 || got.Attachments[1].Position != 1 {
+		t.Fatalf("attachments = %+v", got.Attachments)
+	}
+	if strings.Contains(strings.ToLower(string(body(t, resp))), "blobid") {
+		t.Fatal("metadata carries a vendor blob identifier")
+	}
+}
+
+func TestAttachmentsOnAPlainMessageIsEmpty(t *testing.T) {
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments", &testCreds)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var got attachmentsResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Attachments == nil || len(got.Attachments) != 0 {
+		t.Fatalf("attachments = %+v, want an empty array", got.Attachments)
+	}
+}
+
+func TestAttachmentsRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"foreign message", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+		{"unknown message", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+		{"outage", mail.ErrUnavailable, http.StatusServiceUnavailable, codeServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{attachmentsFn: func(context.Context, string) ([]mail.Attachment, error) {
+				return nil, tc.err
+			}}
+			srv := newTestServer(t, f, Options{})
+			resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments", &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestDownloadAttachmentStreamsWithSafeHeaders(t *testing.T) {
+	f := &fakeReader{downloadFn: func(context.Context, string, int) (mail.AttachmentDownload, error) {
+		return mail.AttachmentDownload{
+			Filename:    "a\r\nInjected: yes.txt",
+			ContentType: "application/octet-stream",
+			Size:        4,
+			Body:        io.NopCloser(strings.NewReader("data")),
+		}, nil
+	}}
+	srv := newTestServer(t, f, Options{})
+
+	resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments/0", &testCreds)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body(t, resp))
+	}
+	if got := string(body(t, resp)); got != "data" {
+		t.Fatalf("body = %q", got)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "4" {
+		t.Fatalf("Content-Length = %q", got)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	disposition := resp.Header.Get("Content-Disposition")
+	if !strings.Contains(disposition, "attachment") || strings.ContainsAny(disposition, "\r\n") ||
+		strings.Contains(disposition, "Injected:") || strings.Count(disposition, "filename=") != 1 {
+		t.Fatalf("Content-Disposition = %q", disposition)
+	}
+	for _, token := range []string{"blob", "jmap", "stalwart", "$draft", "messageid"} {
+		if strings.Contains(strings.ToLower(disposition), token) {
+			t.Fatalf("Content-Disposition carries vendor token %q: %q", token, disposition)
+		}
+	}
+	f.mu.Lock()
+	position := f.gotPosition
+	f.mu.Unlock()
+	if position != 0 {
+		t.Fatalf("position = %d", position)
+	}
+}
+
+func TestDownloadAttachmentUsesTheDefaultContentTypeForInvalidValues(t *testing.T) {
+	f := &fakeReader{downloadFn: func(context.Context, string, int) (mail.AttachmentDownload, error) {
+		return mail.AttachmentDownload{
+			Filename: "a.bin", ContentType: "not a media type", Size: 1,
+			Body: io.NopCloser(strings.NewReader("x")),
+		}, nil
+	}}
+	srv := newTestServer(t, f, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments/0", &testCreds)
+	if got := resp.Header.Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+}
+
+func TestDownloadAttachmentRejectsBadPositions(t *testing.T) {
+	for _, raw := range []string{"abc", "-1", "01", "+1", "1.5"} {
+		f := &fakeReader{downloadFn: func(context.Context, string, int) (mail.AttachmentDownload, error) {
+			t.Fatal("a malformed position reached the mail service")
+			return mail.AttachmentDownload{}, nil
+		}}
+		srv := newTestServer(t, f, Options{})
+		resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments/"+raw, &testCreds)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("position %q: status = %d, want 400", raw, resp.StatusCode)
+		}
+		if got := decodeError(t, resp); got.Code != codeInvalidRequest {
+			t.Fatalf("position %q: error = %+v", raw, got)
+		}
+	}
+}
+
+func TestDownloadAttachmentRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"unknown position", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+		{"upstream failure", mail.ErrUnavailable, http.StatusServiceUnavailable, codeServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{downloadFn: func(context.Context, string, int) (mail.AttachmentDownload, error) {
+				return mail.AttachmentDownload{}, tc.err
+			}}
+			srv := newTestServer(t, f, Options{})
+			resp := request(t, srv, http.MethodGet, "/v1/messages/msg1_a/attachments/0", &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestAttachmentPathsRequireGet(t *testing.T) {
+	srv := newTestServer(t, &fakeReader{}, Options{})
+	for _, path := range []string{"/v1/messages/msg1_a/attachments", "/v1/messages/msg1_a/attachments/0"} {
+		resp := request(t, srv, http.MethodPost, path, &testCreds)
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("%s: status = %d, want 405", path, resp.StatusCode)
+		}
 	}
 }

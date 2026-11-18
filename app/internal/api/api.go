@@ -106,6 +106,8 @@ func New(service Service, opts Options) *Server {
 	mux.HandleFunc("/v1/messages", s.protected(s.send))
 	mux.HandleFunc("/v1/messages/{messageID}", s.protected(s.messageByID))
 	mux.HandleFunc("/v1/messages/{messageID}/reply", s.protected(s.reply))
+	mux.HandleFunc("/v1/messages/{messageID}/attachments", s.protected(s.attachments))
+	mux.HandleFunc("/v1/messages/{messageID}/attachments/{position}", s.protected(s.downloadAttachment))
 	mux.HandleFunc("/v1/drafts", s.protected(s.drafts))
 	mux.HandleFunc("/v1/drafts/{draftID}/send", s.protected(s.sendDraft))
 	// Catch-all so an unknown path is a JSON error like every other failure.
