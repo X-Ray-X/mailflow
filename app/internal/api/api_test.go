@@ -34,13 +34,20 @@ type fakeReader struct {
 	messagesFn  func(context.Context) (mail.Page, error)
 	messageFn   func(context.Context) (mail.Message, error)
 
-	sendFn     func(context.Context, mail.OutgoingMessage) (string, error)
-	setFlagsFn func(context.Context, string, mail.FlagPatch) (mail.MessageSummary, error)
+	sendFn      func(context.Context, mail.OutgoingMessage) (string, error)
+	updateFn    func(context.Context, string, mail.MessagePatch) (mail.MessageSummary, error)
+	deleteMsgFn func(context.Context, string) error
 
-	gotSend    mail.OutgoingMessage
-	gotFlagID  string
-	gotPatch   mail.FlagPatch
-	writeCalls int
+	createMailboxFn func(context.Context, string) (string, error)
+	renameMailboxFn func(context.Context, string, string) error
+	deleteMailboxFn func(context.Context, string) error
+
+	gotSend        mail.OutgoingMessage
+	gotMessageID   string
+	gotPatch       mail.MessagePatch
+	gotMailboxID   string
+	gotMailboxName string
+	writeCalls     int
 }
 
 func (f *fakeReader) record(creds mail.Credentials) {
@@ -93,17 +100,66 @@ func (f *fakeReader) Send(ctx context.Context, creds mail.Credentials, msg mail.
 	return "", nil
 }
 
-func (f *fakeReader) SetFlags(ctx context.Context, creds mail.Credentials, messageID string, patch mail.FlagPatch) (mail.MessageSummary, error) {
+func (f *fakeReader) UpdateMessage(ctx context.Context, creds mail.Credentials, messageID string, patch mail.MessagePatch) (mail.MessageSummary, error) {
 	f.record(creds)
 	f.mu.Lock()
-	f.gotFlagID = messageID
+	f.gotMessageID = messageID
 	f.gotPatch = patch
 	f.writeCalls++
 	f.mu.Unlock()
-	if f.setFlagsFn != nil {
-		return f.setFlagsFn(ctx, messageID, patch)
+	if f.updateFn != nil {
+		return f.updateFn(ctx, messageID, patch)
 	}
 	return mail.MessageSummary{}, nil
+}
+
+func (f *fakeReader) DeleteMessage(ctx context.Context, creds mail.Credentials, messageID string) error {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMessageID = messageID
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.deleteMsgFn != nil {
+		return f.deleteMsgFn(ctx, messageID)
+	}
+	return nil
+}
+
+func (f *fakeReader) CreateMailbox(ctx context.Context, creds mail.Credentials, name string) (string, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMailboxName = name
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.createMailboxFn != nil {
+		return f.createMailboxFn(ctx, name)
+	}
+	return "", nil
+}
+
+func (f *fakeReader) RenameMailbox(ctx context.Context, creds mail.Credentials, mailboxID, name string) error {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMailboxID = mailboxID
+	f.gotMailboxName = name
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.renameMailboxFn != nil {
+		return f.renameMailboxFn(ctx, mailboxID, name)
+	}
+	return nil
+}
+
+func (f *fakeReader) DeleteMailbox(ctx context.Context, creds mail.Credentials, mailboxID string) error {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMailboxID = mailboxID
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.deleteMailboxFn != nil {
+		return f.deleteMailboxFn(ctx, mailboxID)
+	}
+	return nil
 }
 
 func (f *fakeReader) snapshot() (mail.Credentials, string, mail.PageRequest, string, int) {
@@ -112,10 +168,16 @@ func (f *fakeReader) snapshot() (mail.Credentials, string, mail.PageRequest, str
 	return f.creds, f.mailboxID, f.pageReq, f.messageID, f.calls
 }
 
-func (f *fakeReader) writeSnapshot() (mail.OutgoingMessage, string, mail.FlagPatch, int) {
+func (f *fakeReader) writeSnapshot() (mail.OutgoingMessage, string, mail.MessagePatch, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.gotSend, f.gotFlagID, f.gotPatch, f.writeCalls
+	return f.gotSend, f.gotMessageID, f.gotPatch, f.writeCalls
+}
+
+func (f *fakeReader) mailboxSnapshot() (string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gotMailboxID, f.gotMailboxName
 }
 
 // fakeRecorder is a scripted idempotency store. The handler's decision is what
@@ -275,7 +337,7 @@ func TestUnknownPathIsJSONNotFound(t *testing.T) {
 
 func TestWrongMethodIsJSONWithAllow(t *testing.T) {
 	srv := newTestServer(t, &fakeReader{}, Options{})
-	resp := request(t, srv, http.MethodPost, "/v1/mailboxes", &testCreds)
+	resp := request(t, srv, http.MethodPut, "/v1/mailboxes", &testCreds)
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
@@ -643,8 +705,11 @@ func TestPayloadsCarryNoVendorVocabulary(t *testing.T) {
 		sendFn: func(context.Context, mail.OutgoingMessage) (string, error) {
 			return "msg1_sent", nil
 		},
-		setFlagsFn: func(_ context.Context, id string, _ mail.FlagPatch) (mail.MessageSummary, error) {
+		updateFn: func(_ context.Context, id string, _ mail.MessagePatch) (mail.MessageSummary, error) {
 			return mail.MessageSummary{ID: id, Subject: "Hi", Read: true}, nil
+		},
+		createMailboxFn: func(context.Context, string) (string, error) {
+			return "mb1_new", nil
 		},
 	}
 	rec := &fakeRecorder{claim: idempotency.Claim{State: idempotency.Claimed}}
@@ -657,12 +722,19 @@ func TestPayloadsCarryNoVendorVocabulary(t *testing.T) {
 		body(t, request(t, srv, http.MethodGet, "/v1/messages/msg1_gone", &testCreds)),
 		body(t, requestJSON(t, srv, http.MethodPost, "/v1/messages", "key-1", validSendBody, &testCreds)),
 		body(t, requestJSON(t, srv, http.MethodPatch, "/v1/messages/msg1_a", "", `{"read":true}`, &testCreds)),
+		body(t, requestJSON(t, srv, http.MethodPatch, "/v1/messages/msg1_a", "", `{"mailboxId":"mb1_b"}`, &testCreds)),
+		body(t, request(t, srv, http.MethodDelete, "/v1/messages/msg1_a", &testCreds)),
+		body(t, requestJSON(t, srv, http.MethodPost, "/v1/mailboxes", "", `{"name":"Projects"}`, &testCreds)),
+		body(t, requestJSON(t, srv, http.MethodPatch, "/v1/mailboxes/mb1_a", "", `{"name":"Work"}`, &testCreds)),
+		body(t, request(t, srv, http.MethodDelete, "/v1/mailboxes/mb1_a", &testCreds)),
 	}
 	forbidden := []string{
 		"urn:", "$seen", "$flagged", "$hasattachment", "keywords", "blobId", "threadId",
 		"mailboxIds", "accountId", "bodyValues", "textBody", "notFound", "anchor",
 		"Email/", "Mailbox/", "queryState", "sessionState", "mail.mailflow.test",
 		"EmailSubmission", "Identity/", "invalidProperties", "onSuccessUpdateEmail",
+		"alreadyExists", "mailboxHasEmail", "mailboxHasChild", "isSubscribed",
+		"parentId", "mayRename", "mayDelete",
 	}
 	for _, payload := range payloads {
 		lower := strings.ToLower(string(payload))
@@ -945,8 +1017,8 @@ func TestSendRequiresPost(t *testing.T) {
 	}
 }
 
-func TestSetFlagsReturnsTheUpdatedSummary(t *testing.T) {
-	f := &fakeReader{setFlagsFn: func(_ context.Context, messageID string, patch mail.FlagPatch) (mail.MessageSummary, error) {
+func TestUpdateMessageReturnsTheUpdatedSummary(t *testing.T) {
+	f := &fakeReader{updateFn: func(_ context.Context, messageID string, patch mail.MessagePatch) (mail.MessageSummary, error) {
 		return mail.MessageSummary{
 			ID:            messageID,
 			Subject:       "Hello",
@@ -957,7 +1029,8 @@ func TestSetFlagsReturnsTheUpdatedSummary(t *testing.T) {
 	}}
 	srv := newTestServer(t, f, Options{})
 
-	resp := requestJSON(t, srv, http.MethodPatch, "/v1/messages/msg1_a", "", `{"read":true,"starred":false}`, &testCreds)
+	resp := requestJSON(t, srv, http.MethodPatch, "/v1/messages/msg1_a", "",
+		`{"read":true,"starred":false,"mailboxId":"mb1_b"}`, &testCreds)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d: %s", resp.StatusCode, body(t, resp))
 	}
@@ -979,10 +1052,19 @@ func TestSetFlagsReturnsTheUpdatedSummary(t *testing.T) {
 	if patch.Read == nil || !*patch.Read || patch.Starred == nil || *patch.Starred {
 		t.Fatalf("patch = %+v", patch)
 	}
+	if patch.MailboxID != "mb1_b" {
+		t.Fatalf("mailbox = %q", patch.MailboxID)
+	}
 }
 
-func TestSetFlagsRejectsEmptyAndUnknownRequests(t *testing.T) {
-	for _, payload := range []string{`{}`, `{"seen":true}`, `{"read":true,"seen":false}`} {
+func TestUpdateMessageRejectsEmptyAndUnknownRequests(t *testing.T) {
+	payloads := []string{
+		`{}`,
+		`{"seen":true}`,
+		`{"read":true,"seen":false}`,
+		`{"mailboxId":""}`,
+	}
+	for _, payload := range payloads {
 		f := &fakeReader{}
 		srv := newTestServer(t, f, Options{})
 		resp := requestJSON(t, srv, http.MethodPatch, "/v1/messages/msg1_a", "", payload, &testCreds)
@@ -998,8 +1080,8 @@ func TestSetFlagsRejectsEmptyAndUnknownRequests(t *testing.T) {
 	}
 }
 
-func TestSetFlagsNotFound(t *testing.T) {
-	f := &fakeReader{setFlagsFn: func(context.Context, string, mail.FlagPatch) (mail.MessageSummary, error) {
+func TestUpdateMessageNotFound(t *testing.T) {
+	f := &fakeReader{updateFn: func(context.Context, string, mail.MessagePatch) (mail.MessageSummary, error) {
 		return mail.MessageSummary{}, mail.ErrNotFound
 	}}
 	srv := newTestServer(t, f, Options{})
@@ -1013,6 +1095,203 @@ func TestSetFlagsNotFound(t *testing.T) {
 	}
 }
 
+func TestDeleteMessageReturnsNoContent(t *testing.T) {
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{})
+
+	resp := request(t, srv, http.MethodDelete, "/v1/messages/msg1_a", &testCreds)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", resp.StatusCode, body(t, resp))
+	}
+	if data := body(t, resp); len(data) != 0 {
+		t.Fatalf("204 carried a body: %s", data)
+	}
+	if _, id, _, calls := f.writeSnapshot(); calls != 1 || id != "msg1_a" {
+		t.Fatalf("service call = %d id %q", calls, id)
+	}
+}
+
+func TestDeleteMessageNotFound(t *testing.T) {
+	f := &fakeReader{deleteMsgFn: func(context.Context, string) error { return mail.ErrNotFound }}
+	srv := newTestServer(t, f, Options{})
+
+	resp := request(t, srv, http.MethodDelete, "/v1/messages/msg1_missing", &testCreds)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if got := decodeError(t, resp); got.Code != codeNotFound {
+		t.Fatalf("error = %+v", got)
+	}
+}
+
+func TestCreateMailbox(t *testing.T) {
+	f := &fakeReader{createMailboxFn: func(context.Context, string) (string, error) {
+		return "mb1_new", nil
+	}}
+	srv := newTestServer(t, f, Options{})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/mailboxes", "", `{"name":"Projects"}`, &testCreds)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body(t, resp))
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q", cc)
+	}
+	var got mailboxResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != "mb1_new" {
+		t.Fatalf("id = %q", got.ID)
+	}
+	_, name := f.mailboxSnapshot()
+	if name != "Projects" {
+		t.Fatalf("name = %q", name)
+	}
+}
+
+func TestCreateMailboxMapsDuplicateAndInvalidNames(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"duplicate", mail.ErrAlreadyExists, http.StatusConflict, codeAlreadyExists},
+		{"invalid", mail.ErrInvalidInput, http.StatusBadRequest, codeInvalidRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{createMailboxFn: func(context.Context, string) (string, error) {
+				return "", tc.err
+			}}
+			srv := newTestServer(t, f, Options{})
+			resp := requestJSON(t, srv, http.MethodPost, "/v1/mailboxes", "", `{"name":"Projects"}`, &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestCreateMailboxRejectsUnknownFields(t *testing.T) {
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/mailboxes", "", `{"name":"Projects","parentId":"mb1_a"}`, &testCreds)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if _, name := f.mailboxSnapshot(); name != "" {
+		t.Fatal("an unknown field reached the mail service")
+	}
+}
+
+func TestRenameMailbox(t *testing.T) {
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{})
+
+	resp := requestJSON(t, srv, http.MethodPatch, "/v1/mailboxes/mb1_a", "", `{"name":"Work"}`, &testCreds)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", resp.StatusCode, body(t, resp))
+	}
+	id, name := f.mailboxSnapshot()
+	if id != "mb1_a" || name != "Work" {
+		t.Fatalf("rename = id %q name %q", id, name)
+	}
+}
+
+func TestRenameMailboxMapsStandardAndDuplicateRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"standard", mail.ErrInvalidInput, http.StatusBadRequest, codeInvalidRequest},
+		{"duplicate", mail.ErrAlreadyExists, http.StatusConflict, codeAlreadyExists},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{renameMailboxFn: func(context.Context, string, string) error { return tc.err }}
+			srv := newTestServer(t, f, Options{})
+			resp := requestJSON(t, srv, http.MethodPatch, "/v1/mailboxes/mb1_a", "", `{"name":"Work"}`, &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestDeleteMailbox(t *testing.T) {
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{})
+
+	resp := request(t, srv, http.MethodDelete, "/v1/mailboxes/mb1_a", &testCreds)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if id, _ := f.mailboxSnapshot(); id != "mb1_a" {
+		t.Fatalf("id = %q", id)
+	}
+}
+
+func TestDeleteMailboxMapsNotEmpty(t *testing.T) {
+	f := &fakeReader{deleteMailboxFn: func(context.Context, string) error { return mail.ErrMailboxNotEmpty }}
+	srv := newTestServer(t, f, Options{})
+
+	resp := request(t, srv, http.MethodDelete, "/v1/mailboxes/mb1_a", &testCreds)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	if got := decodeError(t, resp); got.Code != codeMailboxNotEmpty {
+		t.Fatalf("error = %+v", got)
+	}
+}
+
+func TestDeleteMailboxMapsStandardAndMissing(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"standard", mail.ErrInvalidInput, http.StatusBadRequest, codeInvalidRequest},
+		{"missing", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{deleteMailboxFn: func(context.Context, string) error { return tc.err }}
+			srv := newTestServer(t, f, Options{})
+			resp := request(t, srv, http.MethodDelete, "/v1/mailboxes/mb1_a", &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestMailboxPathRejectsUnsupportedMethods(t *testing.T) {
+	srv := newTestServer(t, &fakeReader{}, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/mailboxes/mb1_a", &testCreds)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+	allow := resp.Header.Get("Allow")
+	if !strings.Contains(allow, "PATCH") || !strings.Contains(allow, "DELETE") {
+		t.Fatalf("Allow = %q", allow)
+	}
+}
+
 func TestMessagePathRejectsUnsupportedMethods(t *testing.T) {
 	srv := newTestServer(t, &fakeReader{}, Options{})
 	resp := request(t, srv, http.MethodPost, "/v1/messages/msg1_a", &testCreds)
@@ -1020,7 +1299,7 @@ func TestMessagePathRejectsUnsupportedMethods(t *testing.T) {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
 	allow := resp.Header.Get("Allow")
-	if !strings.Contains(allow, "PATCH") || !strings.Contains(allow, "GET") {
+	if !strings.Contains(allow, "PATCH") || !strings.Contains(allow, "GET") || !strings.Contains(allow, "DELETE") {
 		t.Fatalf("Allow = %q", allow)
 	}
 }

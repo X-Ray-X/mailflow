@@ -43,6 +43,15 @@ var (
 	// ErrRejected means the server declined the message itself. Retrying the
 	// same input cannot succeed, which is why it is not an outage.
 	ErrRejected = errors.New("mail server declined the message")
+	// ErrAlreadyExists means the server refused a create or rename because
+	// another object already holds the name.
+	ErrAlreadyExists = errors.New("mail server reports an object already exists")
+	// ErrMailboxNotEmpty means the server refused to destroy a mailbox that
+	// still holds messages or child mailboxes.
+	ErrMailboxNotEmpty = errors.New("mailbox still holds messages or children")
+	// ErrInvalidInput means the server rejected a value in the request, such as
+	// a name or a parent that cannot be used.
+	ErrInvalidInput = errors.New("mail server rejected a value in the request")
 )
 
 // Credentials are forwarded from the caller. They are never stored.

@@ -19,9 +19,13 @@ import (
 // short enough that the database key stays small.
 const maxIdempotencyKey = 200
 
-// maxFlagBody is the whole PATCH body. Two booleans and JSON punctuation fit
-// with room to spare.
-const maxFlagBody = 4 << 10
+// maxPatchBody is the whole message PATCH body. Two booleans, one identifier,
+// and JSON punctuation fit with room to spare.
+const maxPatchBody = 4 << 10
+
+// maxMailboxBody is the whole create or rename body. A name is at most 255
+// bytes, so this is generous.
+const maxMailboxBody = 4 << 10
 
 // writeTimeout bounds the bookkeeping calls that must outlive the request
 // context, such as recording a completed send after the client disconnected.
@@ -38,9 +42,18 @@ type sendResponse struct {
 	ID string `json:"id"`
 }
 
-type flagRequest struct {
-	Read    *bool `json:"read"`
-	Starred *bool `json:"starred"`
+type messagePatchRequest struct {
+	Read      *bool   `json:"read"`
+	Starred   *bool   `json:"starred"`
+	MailboxID *string `json:"mailboxId"`
+}
+
+type mailboxRequest struct {
+	Name string `json:"name"`
+}
+
+type mailboxResponse struct {
+	ID string `json:"id"`
 }
 
 // send accepts a plain-text message for delivery. The idempotency claim comes
@@ -125,28 +138,81 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sendResponse{ID: id})
 }
 
-// setFlags applies a desired-state flag update. Repeating the same patch
-// changes nothing, so no idempotency key is involved.
-func (s *Server) setFlags(w http.ResponseWriter, r *http.Request) {
-	var req flagRequest
-	if err := decodeJSON(w, r, &req, maxFlagBody); err != nil {
+// updateMessage applies a desired-state message patch: flags, a move, or both.
+// Repeating the same patch changes nothing, so no idempotency key is involved.
+func (s *Server) updateMessage(w http.ResponseWriter, r *http.Request) {
+	var req messagePatchRequest
+	if err := decodeJSON(w, r, &req, maxPatchBody); err != nil {
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
-	if req.Read == nil && req.Starred == nil {
-		writeError(w, http.StatusBadRequest, codeInvalidRequest, "at least one of read or starred is required")
+	if req.Read == nil && req.Starred == nil && req.MailboxID == nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, "at least one of read, starred, or mailboxId is required")
 		return
 	}
 
-	summary, err := s.service.SetFlags(r.Context(), credentials(r.Context()), r.PathValue("messageID"), mail.FlagPatch{
-		Read:    req.Read,
-		Starred: req.Starred,
-	})
+	patch := mail.MessagePatch{Read: req.Read, Starred: req.Starred}
+	if req.MailboxID != nil {
+		if *req.MailboxID == "" {
+			writeError(w, http.StatusBadRequest, codeInvalidRequest, "mailboxId must not be empty")
+			return
+		}
+		patch.MailboxID = *req.MailboxID
+	}
+
+	summary, err := s.service.UpdateMessage(r.Context(), credentials(r.Context()), r.PathValue("messageID"), patch)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toMessageSummaryDTO(summary))
+}
+
+// deleteMessage moves the message to trash. It never erases it, so the caller
+// can restore it by moving it out again.
+func (s *Server) deleteMessage(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeleteMessage(r.Context(), credentials(r.Context()), r.PathValue("messageID")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeNoContent(w)
+}
+
+// createMailbox creates a top-level custom mailbox. The name is the natural
+// key, so a retry cannot make a second one; it answers already_exists instead.
+func (s *Server) createMailbox(w http.ResponseWriter, r *http.Request) {
+	var req mailboxRequest
+	if err := decodeJSON(w, r, &req, maxMailboxBody); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	id, err := s.service.CreateMailbox(r.Context(), credentials(r.Context()), req.Name)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, mailboxResponse{ID: id})
+}
+
+func (s *Server) renameMailbox(w http.ResponseWriter, r *http.Request) {
+	var req mailboxRequest
+	if err := decodeJSON(w, r, &req, maxMailboxBody); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	if err := s.service.RenameMailbox(r.Context(), credentials(r.Context()), r.PathValue("mailboxID"), req.Name); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeNoContent(w)
+}
+
+func (s *Server) deleteMailbox(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeleteMailbox(r.Context(), credentials(r.Context()), r.PathValue("mailboxID")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeNoContent(w)
 }
 
 // validateSend applies the contract's bounds before anything reaches the mail
@@ -247,6 +313,11 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) er
 		}
 		if errors.Is(err, io.EOF) {
 			return errors.New("request body is required")
+		}
+		// Do not echo the field name: it is caller input, and a response should
+		// carry only the contract's own vocabulary.
+		if strings.Contains(err.Error(), "unknown field") {
+			return errors.New("request body contains an unknown field")
 		}
 		return fmt.Errorf("invalid request body: %v", err)
 	}

@@ -32,12 +32,15 @@ FORBIDDEN = [
     "textbody", "notfound", "notcreated", "querystate", "sessionstate", "anchor",
     "email/", "mailbox/", "jmap", "stalwart", "mail.mailflow.test",
     "emailsubmission", "identity/", "invalidproperties", "onsuccessupdateemail",
+    "alreadyexists", "mailboxhasemail", "mailboxhaschild", "issubscribed",
+    "parentid", "mayrename", "maydelete", "ondestroyremoveemails",
 ]
 
 DOCUMENTED_CODES = {
     "unauthorized", "not_found", "invalid_cursor", "invalid_request",
     "method_not_allowed", "service_unavailable", "internal",
-    "conflict", "in_progress", "send_rejected",
+    "conflict", "in_progress", "send_rejected", "already_exists",
+    "mailbox_not_empty",
 }
 
 
@@ -147,6 +150,7 @@ def main():
     # The mail server numbers objects per account, so the standard mailboxes
     # collide. That is what makes the cross-account assertions meaningful.
     bob_inbox = next(b for b in boxes["bob"] if b["role"] == "inbox")
+    bob_trash = next(b for b in boxes["bob"] if b["role"] == "trash")
     alice_inbox = next(b for b in boxes["alice"] if b["role"] == "inbox")
     bob_account, bob_raw_inbox = segments(bob_inbox["id"])
     alice_account, alice_raw_inbox = segments(alice_inbox["id"])
@@ -347,8 +351,202 @@ def main():
     else:
         print("SKIP no attachment in bob's inbox to check flag preservation")
 
+    # --- mailbox organization ----------------------------------------------
+    # Every object created here is removed again, including on a failed check.
+    org_name = f"Verify {stamp}"
+    renamed_name = f"{org_name} Work"
+    other_name = f"Verify Other {stamp}"
+    created_box = created_other = None
+    moved_id = None
+    trashed_id = None
+    try:
+        status, _, created = api.call("/v1/mailboxes", bob_creds, method="POST",
+                                      body={"name": org_name})
+        created_box = created.get("id") or None
+        report.check("bob: a mailbox can be created",
+                     status == 201 and (created_box or "").startswith("mb1_"),
+                     f"status={status} body={created}")
+
+        status, _, listing = api.call("/v1/mailboxes", bob_creds)
+        listed = next((b for b in (listing.get("mailboxes") or []) if b["id"] == created_box), None)
+        report.check("the new mailbox is listed as custom",
+                     status == 200 and listed is not None and listed.get("role") == "custom",
+                     str(listed))
+
+        status, _, body = api.call("/v1/mailboxes", bob_creds, method="POST",
+                                   body={"name": org_name})
+        report.check("a duplicate mailbox name is refused",
+                     status == 409 and body.get("code") == "already_exists",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call("/v1/mailboxes", bob_creds, method="POST",
+                                   body={"name": org_name.upper()})
+        report.check("a duplicate name is refused ignoring case",
+                     status == 409 and body.get("code") == "already_exists",
+                     f"status={status} body={body}")
+
+        for bad_name in ("", "   ", "bad/name", "bad\nname", "x" * 256):
+            status, _, body = api.call("/v1/mailboxes", bob_creds, method="POST",
+                                       body={"name": bad_name})
+            report.check(f"an invalid mailbox name is refused ({bad_name[:12]!r})",
+                         status == 400 and body.get("code") == "invalid_request",
+                         f"status={status} body={body}")
+
+        status, _, body = api.call("/v1/mailboxes", bob_creds, method="POST",
+                                   body={"name": f"Child {stamp}", "parentId": created_box})
+        report.check("a mailbox request cannot name a parent",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call(f"/v1/mailboxes/{created_box}", bob_creds, method="PATCH",
+                                   body={"name": renamed_name})
+        report.check("a custom mailbox can be renamed", status == 204,
+                     f"status={status} body={body}")
+
+        status, _, listing = api.call("/v1/mailboxes", bob_creds)
+        listed = next((b for b in (listing.get("mailboxes") or []) if b["id"] == created_box), None)
+        report.check("the renamed mailbox keeps its identifier",
+                     listed is not None and listed.get("name") == renamed_name, str(listed))
+
+        status, _, body = api.call(f"/v1/mailboxes/{created_box}", bob_creds, method="PATCH",
+                                   body={"name": renamed_name})
+        report.check("renaming to the current name succeeds", status == 204,
+                     f"status={status} body={body}")
+
+        status, _, created = api.call("/v1/mailboxes", bob_creds, method="POST",
+                                      body={"name": other_name})
+        created_other = created.get("id") or None
+        report.check("a second custom mailbox can be created",
+                     status == 201 and (created_other or "").startswith("mb1_"),
+                     f"status={status} body={created}")
+
+        status, _, body = api.call(f"/v1/mailboxes/{created_other}", bob_creds, method="PATCH",
+                                   body={"name": renamed_name})
+        report.check("a rename into a duplicate name is refused",
+                     status == 409 and body.get("code") == "already_exists",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call(f"/v1/mailboxes/{bob_inbox['id']}", bob_creds,
+                                   method="PATCH", body={"name": "Nope"})
+        report.check("a standard mailbox cannot be renamed",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call(f"/v1/mailboxes/{bob_inbox['id']}", bob_creds, method="DELETE")
+        report.check("a standard mailbox cannot be deleted",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        # Move a message into the new mailbox, preserving flags and attachment
+        # state, then refuse to delete the mailbox while it holds the message.
+        moved_id = attachment["id"] if attachment is not None else (
+            received["id"] if received is not None else summary["id"])
+        status, _, moved = api.call(f"/v1/messages/{moved_id}", bob_creds, method="PATCH",
+                                    body={"mailboxId": created_box, "starred": True})
+        report.check("a message can be moved",
+                     status == 200 and moved.get("id") == moved_id,
+                     f"status={status} body={moved}")
+        report.check("a move preserves flags", moved.get("starred") is True, str(moved))
+        if attachment is not None:
+            report.check("a move preserves attachment state",
+                         moved.get("hasAttachment") is True, str(moved))
+
+        status, _, listing = api.call(f"/v1/mailboxes/{created_box}/messages?limit=100", bob_creds)
+        report.check("the moved message is in the target mailbox",
+                     status == 200 and any(m["id"] == moved_id for m in (listing.get("messages") or [])),
+                     f"status={status}")
+
+        status, _, listing = api.call(f"/v1/mailboxes/{bob_inbox['id']}/messages?limit=100", bob_creds)
+        report.check("the moved message left the source mailbox",
+                     status == 200 and not any(m["id"] == moved_id for m in (listing.get("messages") or [])),
+                     f"status={status}")
+
+        status, _, again = api.call(f"/v1/messages/{moved_id}", bob_creds, method="PATCH",
+                                    body={"mailboxId": created_box})
+        report.check("moving to the current mailbox is a no-op",
+                     status == 200 and again.get("id") == moved_id, f"status={status} body={again}")
+
+        status, _, body = api.call(f"/v1/mailboxes/{created_box}", bob_creds, method="DELETE")
+        report.check("a mailbox holding a message is not deleted",
+                     status == 409 and body.get("code") == "mailbox_not_empty",
+                     f"status={status} body={body}")
+
+        status, _, restored = api.call(f"/v1/messages/{moved_id}", bob_creds, method="PATCH",
+                                       body={"mailboxId": bob_inbox["id"]})
+        report.check("a moved message can be moved back",
+                     status == 200 and restored.get("id") == moved_id,
+                     f"status={status} body={restored}")
+        status, _, listing = api.call(f"/v1/mailboxes/{bob_inbox['id']}/messages?limit=100", bob_creds)
+        report.check("the restored message is in the inbox",
+                     status == 200 and any(m["id"] == moved_id for m in (listing.get("messages") or [])),
+                     f"status={status}")
+        moved_id = None
+
+        status, _, body = api.call(f"/v1/mailboxes/{created_box}", bob_creds, method="DELETE")
+        report.check("an empty custom mailbox is deleted", status == 204,
+                     f"status={status} body={body}")
+        created_box = None
+
+        # Delete is a soft delete to trash, is repeatable, and is reversible.
+        status, _, listing = api.call(f"/v1/mailboxes/{bob_inbox['id']}/messages?limit=100", bob_creds)
+        candidates = [m["id"] for m in (listing.get("messages") or []) if m["id"] != moved_id]
+        if candidates:
+            trashed_id = candidates[0]
+            status, _, body = api.call(f"/v1/messages/{trashed_id}", bob_creds, method="DELETE")
+            report.check("a message can be deleted", status == 204,
+                         f"status={status} body={body}")
+
+            status, _, listing = api.call(f"/v1/mailboxes/{bob_trash['id']}/messages?limit=100", bob_creds)
+            report.check("delete moves the message to trash",
+                         status == 200 and any(m["id"] == trashed_id for m in (listing.get("messages") or [])),
+                         f"status={status}")
+
+            status, _, body = api.call(f"/v1/messages/{trashed_id}", bob_creds, method="DELETE")
+            report.check("a repeated delete succeeds", status == 204,
+                         f"status={status} body={body}")
+
+            status, _, restored = api.call(f"/v1/messages/{trashed_id}", bob_creds, method="PATCH",
+                                           body={"mailboxId": bob_inbox["id"]})
+            report.check("a deleted message can be restored",
+                         status == 200 and restored.get("id") == trashed_id,
+                         f"status={status} body={restored}")
+            status, _, listing = api.call(f"/v1/mailboxes/{bob_inbox['id']}/messages?limit=100", bob_creds)
+            report.check("the restored message is in the inbox",
+                         status == 200 and any(m["id"] == trashed_id for m in (listing.get("messages") or [])),
+                         f"status={status}")
+            trashed_id = None
+        else:
+            print("SKIP no second message in bob's inbox to check soft deletion")
+
+        # Cross-account identifiers are refused before the mail server resolves
+        # them, for mailboxes and for message moves and deletes.
+        status, _, body = api.call(f"/v1/mailboxes/{alice_inbox['id']}", bob_creds,
+                                   method="PATCH", body={"name": "Nope"})
+        report.check("bob cannot rename alice's mailbox",
+                     status == 404 and body.get("code") == "not_found", f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/mailboxes/{alice_inbox['id']}", bob_creds, method="DELETE")
+        report.check("bob cannot delete alice's mailbox",
+                     status == 404 and body.get("code") == "not_found", f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{summary['id']}", bob_creds, method="PATCH",
+                                   body={"mailboxId": alice_inbox["id"]})
+        report.check("bob cannot move a message into alice's mailbox",
+                     status == 404 and body.get("code") == "not_found", f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{alice_message['id']}", bob_creds, method="DELETE")
+        report.check("bob cannot delete alice's message",
+                     status == 404 and body.get("code") == "not_found", f"status={status} body={body}")
+    finally:
+        if moved_id:
+            api.call(f"/v1/messages/{moved_id}", bob_creds, method="PATCH",
+                     body={"mailboxId": bob_inbox["id"]})
+        if trashed_id:
+            api.call(f"/v1/messages/{trashed_id}", bob_creds, method="PATCH",
+                     body={"mailboxId": bob_inbox["id"]})
+        for box_id in (created_box, created_other):
+            if box_id:
+                api.call(f"/v1/mailboxes/{box_id}", bob_creds, method="DELETE")
+
     # --- methods and paths --------------------------------------------------
-    status, headers, body = api.call("/v1/mailboxes", accounts["bob"], method="POST")
+    status, headers, body = api.call("/v1/mailboxes", accounts["bob"], method="PUT")
     report.check("a write method is refused",
                  status == 405 and body.get("code") == "method_not_allowed", f"status={status}")
     report.check("the refusal names the allowed methods", "GET" in (headers.get("Allow") or ""),

@@ -47,10 +47,20 @@ type fakeUpstream struct {
 	destroyed  []string
 	destroyErr error
 
-	keywordsID      string
-	keywordsRead    *bool
-	keywordsStarred *bool
-	keywordsErr     error
+	updateID    string
+	updatePatch jmap.EmailPatch
+	updateErr   error
+
+	createdMailboxName string
+	createdMailboxID   string
+	createMailboxErr   error
+
+	renamedMailboxID   string
+	renamedMailboxName string
+	renameMailboxErr   error
+
+	destroyedMailboxID string
+	destroyMailboxErr  error
 
 	gotAccount     string
 	gotMailboxID   string
@@ -117,12 +127,30 @@ func (f *fakeUpstream) DestroyEmails(_ context.Context, _ jmap.Credentials, acco
 	return f.destroyErr
 }
 
-func (f *fakeUpstream) SetEmailKeywords(_ context.Context, _ jmap.Credentials, accountID, emailID string, read, starred *bool) error {
+func (f *fakeUpstream) UpdateEmail(_ context.Context, _ jmap.Credentials, accountID, emailID string, patch jmap.EmailPatch) error {
 	f.gotAccount = accountID
-	f.keywordsID = emailID
-	f.keywordsRead = read
-	f.keywordsStarred = starred
-	return f.keywordsErr
+	f.updateID = emailID
+	f.updatePatch = patch
+	return f.updateErr
+}
+
+func (f *fakeUpstream) CreateMailbox(_ context.Context, _ jmap.Credentials, accountID, name string) (string, error) {
+	f.gotAccount = accountID
+	f.createdMailboxName = name
+	return f.createdMailboxID, f.createMailboxErr
+}
+
+func (f *fakeUpstream) RenameMailbox(_ context.Context, _ jmap.Credentials, accountID, mailboxID, name string) error {
+	f.gotAccount = accountID
+	f.renamedMailboxID = mailboxID
+	f.renamedMailboxName = name
+	return f.renameMailboxErr
+}
+
+func (f *fakeUpstream) DestroyMailbox(_ context.Context, _ jmap.Credentials, accountID, mailboxID string) error {
+	f.gotAccount = accountID
+	f.destroyedMailboxID = mailboxID
+	return f.destroyMailboxErr
 }
 
 func newTestService(f *fakeUpstream) *Service {
@@ -699,43 +727,386 @@ func TestServiceSendChoosesTheMatchingIdentity(t *testing.T) {
 	}
 }
 
-func TestServiceSetFlagsPatchesOnlyNamedKeywords(t *testing.T) {
+func TestServiceUpdateMessagePatchesOnlyNamedKeywords(t *testing.T) {
 	f := &fakeUpstream{emails: []jmap.Email{{
 		ID:            "e1",
 		Subject:       "Hello",
 		Keywords:      map[string]bool{"$seen": true, "$hasattachment": true},
 		HasAttachment: true,
 	}}}
-	got, err := newTestService(f).SetFlags(context.Background(), testCreds,
-		ids.Message(testAccount, "e1"), FlagPatch{Read: boolPtr(true)})
+	got, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), MessagePatch{Read: boolPtr(true)})
 	if err != nil {
-		t.Fatalf("SetFlags: %v", err)
+		t.Fatalf("UpdateMessage: %v", err)
 	}
-	if f.keywordsID != "e1" || f.keywordsRead == nil || !*f.keywordsRead || f.keywordsStarred != nil {
-		t.Fatalf("patch = id %q read %v starred %v", f.keywordsID, f.keywordsRead, f.keywordsStarred)
+	if f.updateID != "e1" || f.updatePatch.Read == nil || !*f.updatePatch.Read ||
+		f.updatePatch.Starred != nil || f.updatePatch.MailboxID != "" {
+		t.Fatalf("patch = id %q %+v", f.updateID, f.updatePatch)
 	}
 	if !got.Read || !got.HasAttachment {
 		t.Fatalf("summary = %+v, want read and the attachment preserved", got)
 	}
 }
 
-func TestServiceSetFlagsRejectsAnotherAccountsMessage(t *testing.T) {
-	f := &fakeUpstream{}
-	_, err := newTestService(f).SetFlags(context.Background(), testCreds,
-		ids.Message("other-account", "e1"), FlagPatch{Read: boolPtr(true)})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("error = %v, want ErrNotFound", err)
+func TestServiceUpdateMessageMovesAndFlagsInOneUpdate(t *testing.T) {
+	f := &fakeUpstream{
+		mailboxExists: true,
+		emails: []jmap.Email{{
+			ID:            "e1",
+			Keywords:      map[string]bool{"$seen": true, "$flagged": true},
+			HasAttachment: true,
+		}},
 	}
-	if f.keywordsID != "" {
-		t.Fatal("patched a message identifier from another account")
+	got, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), MessagePatch{Starred: boolPtr(true), MailboxID: ids.Mailbox(testAccount, "m2")})
+	if err != nil {
+		t.Fatalf("UpdateMessage: %v", err)
+	}
+	if f.updatePatch.MailboxID != "m2" {
+		t.Fatalf("target = %q, want the server identifier", f.updatePatch.MailboxID)
+	}
+	if f.updatePatch.Starred == nil || !*f.updatePatch.Starred {
+		t.Fatalf("flags were not sent with the move: %+v", f.updatePatch)
+	}
+	if !got.Starred || !got.HasAttachment {
+		t.Fatalf("summary = %+v, want flags and attachment preserved", got)
 	}
 }
 
-func TestServiceSetFlagsMapsNotFound(t *testing.T) {
-	f := &fakeUpstream{keywordsErr: jmap.ErrNotFound}
-	_, err := newTestService(f).SetFlags(context.Background(), testCreds,
-		ids.Message(testAccount, "gone"), FlagPatch{Starred: boolPtr(true)})
+func TestServiceUpdateMessageRejectsAnotherAccountsMessage(t *testing.T) {
+	f := &fakeUpstream{}
+	_, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message("other-account", "e1"), MessagePatch{Read: boolPtr(true)})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.updateID != "" {
+		t.Fatal("updated a message identifier from another account")
+	}
+}
+
+func TestServiceUpdateMessageRejectsAnotherAccountsMailbox(t *testing.T) {
+	f := &fakeUpstream{}
+	_, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), MessagePatch{MailboxID: ids.Mailbox("other-account", "m2")})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.updateID != "" {
+		t.Fatal("moved a message into a mailbox from another account")
+	}
+	if f.mailboxQueries != 0 {
+		t.Fatal("asked the mail server about a foreign mailbox identifier")
+	}
+}
+
+func TestServiceUpdateMessageRejectsUnknownTargetMailbox(t *testing.T) {
+	f := &fakeUpstream{mailboxExists: false}
+	_, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), MessagePatch{MailboxID: ids.Mailbox(testAccount, "gone")})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.updateID != "" {
+		t.Fatal("moved a message into a mailbox that does not exist")
+	}
+}
+
+func TestServiceUpdateMessageRejectsAnEmptyPatch(t *testing.T) {
+	f := &fakeUpstream{}
+	_, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), MessagePatch{})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.updateID != "" {
+		t.Fatal("sent an empty patch to the mail server")
+	}
+}
+
+func TestServiceUpdateMessageMapsNotFound(t *testing.T) {
+	f := &fakeUpstream{updateErr: jmap.ErrNotFound}
+	_, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "gone"), MessagePatch{Starred: boolPtr(true)})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceUpdateMessageMapsInvalidInput(t *testing.T) {
+	f := &fakeUpstream{updateErr: jmap.ErrInvalidInput}
+	_, err := newTestService(f).UpdateMessage(context.Background(), testCreds,
+		ids.Message(testAccount, "e1"), MessagePatch{Starred: boolPtr(true)})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func trashFixture() *fakeUpstream {
+	return &fakeUpstream{mailboxes: []jmap.Mailbox{
+		{ID: "a", Name: "Inbox", Role: "inbox"},
+		{ID: "t", Name: "Trash", Role: "trash"},
+	}}
+}
+
+func TestServiceDeleteMessageMovesToTrash(t *testing.T) {
+	f := trashFixture()
+	if err := newTestService(f).DeleteMessage(context.Background(), testCreds, ids.Message(testAccount, "e1")); err != nil {
+		t.Fatalf("DeleteMessage: %v", err)
+	}
+	if f.updateID != "e1" || f.updatePatch.MailboxID != "t" {
+		t.Fatalf("update = id %q patch %+v, want a move to trash", f.updateID, f.updatePatch)
+	}
+	if f.destroyed != nil {
+		t.Fatalf("destroyed %v; delete must not erase", f.destroyed)
+	}
+}
+
+func TestServiceDeleteMessageInTrashIsARepeatedNoOp(t *testing.T) {
+	f := trashFixture()
+	svc := newTestService(f)
+	for i := 0; i < 2; i++ {
+		if err := svc.DeleteMessage(context.Background(), testCreds, ids.Message(testAccount, "e1")); err != nil {
+			t.Fatalf("DeleteMessage %d: %v", i, err)
+		}
+	}
+	if f.updatePatch.MailboxID != "t" {
+		t.Fatalf("patch = %+v", f.updatePatch)
+	}
+}
+
+func TestServiceDeleteMessageWithoutTrashIsUnavailable(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "a", Name: "Inbox", Role: "inbox"}}}
+	err := newTestService(f).DeleteMessage(context.Background(), testCreds, ids.Message(testAccount, "e1"))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+	if f.updateID != "" {
+		t.Fatal("moved a message with no trash mailbox to move it to")
+	}
+}
+
+func TestServiceDeleteMessageRejectsAnotherAccountsMessage(t *testing.T) {
+	f := trashFixture()
+	err := newTestService(f).DeleteMessage(context.Background(), testCreds, ids.Message("other-account", "e1"))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.updateID != "" {
+		t.Fatal("deleted a message identifier from another account")
+	}
+}
+
+func TestServiceDeleteMessageMapsNotFound(t *testing.T) {
+	f := trashFixture()
+	f.updateErr = jmap.ErrNotFound
+	err := newTestService(f).DeleteMessage(context.Background(), testCreds, ids.Message(testAccount, "gone"))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceCreateMailboxValidatesNames(t *testing.T) {
+	invalid := []string{
+		"",
+		"   ",
+		strings.Repeat("a", maxMailboxNameBytes+1),
+		strings.Repeat("é", maxMailboxNameBytes/2+1),
+		"a/b",
+		"a\nb",
+		"a\x00b",
+		"\xff",
+	}
+	for _, name := range invalid {
+		f := &fakeUpstream{}
+		_, err := newTestService(f).CreateMailbox(context.Background(), testCreds, name)
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("name %q: error = %v, want ErrInvalidInput", name, err)
+		}
+		if f.createdMailboxName != "" {
+			t.Errorf("name %q reached the mail server", name)
+		}
+	}
+}
+
+func TestServiceCreateMailboxTrimsAndMapsTheIdentifier(t *testing.T) {
+	f := &fakeUpstream{createdMailboxID: "m9"}
+	got, err := newTestService(f).CreateMailbox(context.Background(), testCreds, "  Projects  ")
+	if err != nil {
+		t.Fatalf("CreateMailbox: %v", err)
+	}
+	if f.createdMailboxName != "Projects" {
+		t.Fatalf("name sent = %q, want it trimmed", f.createdMailboxName)
+	}
+	account, vendor, err := ids.ParseMailbox(got)
+	if err != nil || account != testAccount || vendor != "m9" {
+		t.Fatalf("identifier = %q (account %q vendor %q error %v)", got, account, vendor, err)
+	}
+}
+
+func TestServiceCreateMailboxRefusesADuplicateIgnoringCase(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "m1", Name: "Projects"}}}
+	_, err := newTestService(f).CreateMailbox(context.Background(), testCreds, "projects")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("error = %v, want ErrAlreadyExists", err)
+	}
+	if f.createdMailboxName != "" {
+		t.Fatal("created a second mailbox with the same name")
+	}
+}
+
+func TestServiceCreateMailboxMapsAVendorRace(t *testing.T) {
+	f := &fakeUpstream{createMailboxErr: jmap.ErrAlreadyExists}
+	_, err := newTestService(f).CreateMailbox(context.Background(), testCreds, "Projects")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("error = %v, want ErrAlreadyExists", err)
+	}
+}
+
+func TestServiceRenameMailbox(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{
+		{ID: "m1", Name: "Projects"},
+		{ID: "a", Name: "Inbox", Role: "inbox"},
+	}}
+	if err := newTestService(f).RenameMailbox(context.Background(), testCreds,
+		ids.Mailbox(testAccount, "m1"), "Work"); err != nil {
+		t.Fatalf("RenameMailbox: %v", err)
+	}
+	if f.renamedMailboxID != "m1" || f.renamedMailboxName != "Work" {
+		t.Fatalf("rename = id %q name %q", f.renamedMailboxID, f.renamedMailboxName)
+	}
+}
+
+func TestServiceRenameMailboxRefusesStandardMailboxes(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "a", Name: "Inbox", Role: "inbox"}}}
+	err := newTestService(f).RenameMailbox(context.Background(), testCreds,
+		ids.Mailbox(testAccount, "a"), "Something")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.renamedMailboxID != "" {
+		t.Fatal("renamed a standard mailbox")
+	}
+}
+
+func TestServiceRenameMailboxRefusesADuplicate(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{
+		{ID: "m1", Name: "Projects"},
+		{ID: "m2", Name: "Work"},
+	}}
+	err := newTestService(f).RenameMailbox(context.Background(), testCreds,
+		ids.Mailbox(testAccount, "m1"), "work")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("error = %v, want ErrAlreadyExists", err)
+	}
+	if f.renamedMailboxID != "" {
+		t.Fatal("renamed into a duplicate")
+	}
+}
+
+func TestServiceRenameMailboxToTheSameNameIsANoOp(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "m1", Name: "Projects"}}}
+	if err := newTestService(f).RenameMailbox(context.Background(), testCreds,
+		ids.Mailbox(testAccount, "m1"), "Projects"); err != nil {
+		t.Fatalf("RenameMailbox: %v", err)
+	}
+	if f.renamedMailboxID != "" {
+		t.Fatal("sent a rename that changes nothing")
+	}
+}
+
+func TestServiceRenameMailboxRejectsForeignAndUnknown(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "m1", Name: "Projects"}}}
+	svc := newTestService(f)
+
+	if err := svc.RenameMailbox(context.Background(), testCreds, ids.Mailbox("other-account", "m1"), "Work"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign error = %v, want ErrNotFound", err)
+	}
+	if err := svc.RenameMailbox(context.Background(), testCreds, ids.Mailbox(testAccount, "gone"), "Work"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown error = %v, want ErrNotFound", err)
+	}
+	if f.renamedMailboxID != "" {
+		t.Fatal("renamed a mailbox the caller does not own")
+	}
+}
+
+func TestServiceRenameMailboxMapsAVendorRace(t *testing.T) {
+	f := &fakeUpstream{
+		mailboxes:        []jmap.Mailbox{{ID: "m1", Name: "Projects"}},
+		renameMailboxErr: jmap.ErrAlreadyExists,
+	}
+	err := newTestService(f).RenameMailbox(context.Background(), testCreds,
+		ids.Mailbox(testAccount, "m1"), "Work")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("error = %v, want ErrAlreadyExists", err)
+	}
+}
+
+func TestServiceDeleteMailbox(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "m1", Name: "Projects"}}}
+	if err := newTestService(f).DeleteMailbox(context.Background(), testCreds, ids.Mailbox(testAccount, "m1")); err != nil {
+		t.Fatalf("DeleteMailbox: %v", err)
+	}
+	if f.destroyedMailboxID != "m1" {
+		t.Fatalf("destroyed = %q", f.destroyedMailboxID)
+	}
+}
+
+func TestServiceDeleteMailboxRefusesStandardMailboxes(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "t", Name: "Trash", Role: "trash"}}}
+	err := newTestService(f).DeleteMailbox(context.Background(), testCreds, ids.Mailbox(testAccount, "t"))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.destroyedMailboxID != "" {
+		t.Fatal("destroyed a standard mailbox")
+	}
+}
+
+func TestServiceDeleteMailboxRefusesMessagesAndChildren(t *testing.T) {
+	cases := map[string][]jmap.Mailbox{
+		"holds messages": {{ID: "m1", Name: "Projects", TotalEmails: 1}},
+		"has children": {
+			{ID: "m1", Name: "Projects"},
+			{ID: "m2", Name: "Child", ParentID: "m1"},
+		},
+	}
+	for name, boxes := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeUpstream{mailboxes: boxes}
+			err := newTestService(f).DeleteMailbox(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"))
+			if !errors.Is(err, ErrMailboxNotEmpty) {
+				t.Fatalf("error = %v, want ErrMailboxNotEmpty", err)
+			}
+			if f.destroyedMailboxID != "" {
+				t.Fatal("destroyed a mailbox that is not empty")
+			}
+		})
+	}
+}
+
+func TestServiceDeleteMailboxMapsAVendorRefusal(t *testing.T) {
+	f := &fakeUpstream{
+		mailboxes:         []jmap.Mailbox{{ID: "m1", Name: "Projects"}},
+		destroyMailboxErr: jmap.ErrMailboxNotEmpty,
+	}
+	err := newTestService(f).DeleteMailbox(context.Background(), testCreds, ids.Mailbox(testAccount, "m1"))
+	if !errors.Is(err, ErrMailboxNotEmpty) {
+		t.Fatalf("error = %v, want ErrMailboxNotEmpty", err)
+	}
+}
+
+func TestServiceDeleteMailboxRejectsForeignAndUnknown(t *testing.T) {
+	f := &fakeUpstream{mailboxes: []jmap.Mailbox{{ID: "m1", Name: "Projects"}}}
+	svc := newTestService(f)
+
+	if err := svc.DeleteMailbox(context.Background(), testCreds, ids.Mailbox("other-account", "m1")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign error = %v, want ErrNotFound", err)
+	}
+	if err := svc.DeleteMailbox(context.Background(), testCreds, ids.Mailbox(testAccount, "gone")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown error = %v, want ErrNotFound", err)
+	}
+	if f.destroyedMailboxID != "" {
+		t.Fatal("destroyed a mailbox the caller does not own")
 	}
 }

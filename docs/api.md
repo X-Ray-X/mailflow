@@ -4,9 +4,10 @@ The Go service that publishes Mailflow's HTTP contract. It adapts to the mail
 server through JMAP and translates the result into Mailflow identifiers and
 vocabulary; nothing in a response is vendor-shaped.
 
-The contract covers reads and the first writes: sending a plain-text message and
-changing a message's flags. Mailbox changes, attachments, search, and push are
-later changes.
+The contract covers reads and writes: sending a plain-text message, changing a
+message's read and starred flags, moving it between mailboxes, deleting it to
+trash, and creating, renaming, and deleting custom mailboxes. Attachments,
+search, and push are later changes.
 
 ## Runtime and build
 
@@ -131,8 +132,9 @@ instance, using the demo accounts from `deploy/mail/.env`:
 ```
 
 It checks paging, body content, cross-account refusal, malformed input, sending
-and replay, flag updates, and scans every response it receives — reads and
-writes — for vendor vocabulary.
+and replay, flag updates, mailbox creation, rename and deletion, message moves
+and soft deletion, and scans every response it receives — reads and writes — for
+vendor vocabulary.
 
 ## Endpoints
 
@@ -154,6 +156,66 @@ Every mailbox of the caller's account.
 
 `role` is one of `inbox`, `sent`, `drafts`, `trash`, `junk`, or `custom`.
 Standard mailboxes are identified by role, never by display name.
+
+### `POST /v1/mailboxes`
+
+Creates a top-level custom mailbox.
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Projects"}' \
+  http://127.0.0.1:8080/v1/mailboxes
+```
+
+A first create answers `201`:
+
+```json
+{ "id": "mb1_ZA.bmV3" }
+```
+
+The name is trimmed, must be 1–255 bytes, and must not contain `/` or a control
+character. It is unique among the caller's mailboxes ignoring case, because the
+list is flat; `Projects` and `projects` cannot both exist. An invalid name is
+`invalid_request`. A name already in use is `already_exists` and creates
+nothing, so a retried create after an unknown outcome cannot make a second
+mailbox: list the account to find the first one.
+
+The mailbox is subscribed, so a standard IMAP client sees it without an extra
+subscription step. Names with `/` are refused even though the mail server might
+accept them, because `/` is the IMAP hierarchy delimiter and a flat contract
+cannot represent the result unambiguously. Hierarchy is not exposed: a nested
+mailbox created by another client is listed flat.
+
+### `PATCH /v1/mailboxes/{mailboxID}`
+
+Renames a custom mailbox. The request states the resulting name, so repeating it
+is a no-op.
+
+```sh
+curl -sS -X PATCH -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Work"}' \
+  http://127.0.0.1:8080/v1/mailboxes/mb1_ZA.bmV3
+```
+
+Success is `204` with no body. The name rules and case-insensitive uniqueness
+are the same as create; a collision is `already_exists`. A standard mailbox
+(`inbox`, `sent`, `drafts`, `trash`, `junk`) is refused with `invalid_request`
+even though the mail server would permit the rename: clients find those
+mailboxes by role, and renaming one would break that. An unknown or foreign
+identifier is `not_found`.
+
+### `DELETE /v1/mailboxes/{mailboxID}`
+
+Deletes an empty custom mailbox. Success is `204` with no body.
+
+Only a mailbox that holds no messages and no child mailboxes can be deleted. A
+mailbox that still holds either answers `mailbox_not_empty`; move or delete its
+contents first. Nothing is cascaded and no message is removed as a side effect.
+A standard mailbox is `invalid_request`, an unknown or foreign identifier is
+`not_found`, and repeating a delete answers `not_found` while changing nothing
+else.
 
 ### `GET /v1/mailboxes/{mailboxID}/messages`
 
@@ -265,8 +327,9 @@ duplicate; the caller should treat the first attempt as unknown.
 
 ### `PATCH /v1/messages/{messageID}`
 
-Sets a message's flags. The request states the desired value; at least one field
-is required, and repeating the same request changes nothing.
+Sets a message's flags and optionally moves it. The request states the desired
+value; at least one of `read`, `starred`, or `mailboxId` is required, and
+repeating the same request changes nothing.
 
 ```sh
 curl -sS -X PATCH -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
@@ -274,6 +337,21 @@ curl -sS -X PATCH -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
   -d '{"read": true, "starred": true}' \
   http://127.0.0.1:8080/v1/messages/msg1_ZA.YjJhYWFhYXA
 ```
+
+`mailboxId` moves the message:
+
+```sh
+curl -sS -X PATCH -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"mailboxId": "mb1_ZA.bmV3"}' \
+  http://127.0.0.1:8080/v1/messages/msg1_ZA.YjJhYWFhYXA
+```
+
+After a move the message is in exactly the named mailbox. Its flags and
+attachments are unchanged, and a patch may move and change flags in one request.
+Moving a message to the mailbox it is already only in is a successful no-op. The
+target must be one of the caller's mailboxes; an unknown or foreign identifier
+is `not_found` and the message stays where it was.
 
 The answer is the message summary in the same shape as a list entry:
 
@@ -289,11 +367,27 @@ The answer is the message summary in the same shape as a list entry:
 }
 ```
 
-Only `read` and `starred` exist. An omitted field is left unchanged; an unknown
-field, an empty body, or a value that is not a boolean is `invalid_request`. A
-message identifier that belongs to another account, or no longer exists, is
-`not_found`. The patch touches only the named flags, so a draft or an attachment
-keeps its state.
+Only `read`, `starred`, and `mailboxId` exist. An omitted field is left
+unchanged; an unknown field, an empty body, an empty `mailboxId`, or a value of
+the wrong type is `invalid_request`. A message identifier that belongs to
+another account, or no longer exists, is `not_found`. The patch touches only the
+named flags, so a draft or an attachment keeps its state.
+
+### `DELETE /v1/messages/{messageID}`
+
+Deletes a message by moving it to the caller's `trash` mailbox.
+
+```sh
+curl -sS -X DELETE -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  http://127.0.0.1:8080/v1/messages/msg1_ZA.YjJhYWFhYXA
+```
+
+Success is `204` with no body. The message is not erased: it leaves the mailbox
+it was in and appears in `trash`, so a client can restore it by patching its
+`mailboxId` back to another mailbox. Deleting a message whose only mailbox is
+already `trash` changes nothing and succeeds, so a repeat is safe. An unknown or
+foreign identifier is `not_found`. Permanent deletion and emptying trash are not
+part of this version.
 
 ### `GET /healthz`
 
@@ -338,6 +432,8 @@ Every failure shares one shape:
 | `method_not_allowed` | 405 | The path does not serve that method; `Allow` names the ones it does |
 | `conflict` | 409 | The idempotency key was already used for a different request |
 | `in_progress` | 409 | A send with this idempotency key is still being processed |
+| `already_exists` | 409 | A mailbox with that name already exists for this caller |
+| `mailbox_not_empty` | 409 | The mailbox still holds messages or child mailboxes |
 | `send_rejected` | 422 | The mail server declined the message itself; retrying the same input cannot succeed |
 | `service_unavailable` | 503 | The mail server or the application database is unreachable or timed out |
 | `internal` | 500 | An unexpected failure |

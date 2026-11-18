@@ -14,6 +14,7 @@ type Mailbox struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	Role         string `json:"role"`
+	ParentID     string `json:"parentId"`
 	TotalEmails  int    `json:"totalEmails"`
 	UnreadEmails int    `json:"unreadEmails"`
 	SortOrder    int    `json:"sortOrder"`
@@ -74,7 +75,7 @@ type QueryResult struct {
 func (c *Client) Mailboxes(ctx context.Context, creds Credentials, accountID string) ([]Mailbox, error) {
 	raw, err := c.Call(ctx, creds, "Mailbox/get", map[string]any{
 		"accountId":  accountID,
-		"properties": []string{"id", "name", "role", "totalEmails", "unreadEmails", "sortOrder"},
+		"properties": []string{"id", "name", "role", "parentId", "totalEmails", "unreadEmails", "sortOrder"},
 	})
 	if err != nil {
 		return nil, err
@@ -108,6 +109,107 @@ func (c *Client) MailboxExists(ctx context.Context, creds Credentials, accountID
 		return false, fmt.Errorf("%w: decode Mailbox/get: %v", ErrUpstream, err)
 	}
 	return len(out.List) == 1, nil
+}
+
+// CreateMailbox creates a top-level custom mailbox and returns its server
+// identifier. It is always subscribed: the probe showed the default is false,
+// and an unsubscribed mailbox can be hidden by a standard client.
+func (c *Client) CreateMailbox(ctx context.Context, creds Credentials, accountID, name string) (string, error) {
+	const createID = "mf-create"
+	raw, err := c.Call(ctx, creds, "Mailbox/set", map[string]any{
+		"accountId": accountID,
+		"create": map[string]any{createID: map[string]any{
+			"name":         name,
+			"isSubscribed": true,
+		}},
+	})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Created map[string]struct {
+			ID string `json:"id"`
+		} `json:"created"`
+		NotCreated map[string]struct {
+			Type string `json:"type"`
+		} `json:"notCreated"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("%w: decode Mailbox/set: %v", ErrUpstream, err)
+	}
+	if entry, ok := out.NotCreated[createID]; ok {
+		return "", mailboxSetError("create", entry.Type)
+	}
+	created, ok := out.Created[createID]
+	if !ok || created.ID == "" {
+		return "", fmt.Errorf("%w: mailbox create returned no identifier", ErrUpstream)
+	}
+	return created.ID, nil
+}
+
+// RenameMailbox changes the name of an existing mailbox.
+func (c *Client) RenameMailbox(ctx context.Context, creds Credentials, accountID, mailboxID, name string) error {
+	raw, err := c.Call(ctx, creds, "Mailbox/set", map[string]any{
+		"accountId": accountID,
+		"update":    map[string]any{mailboxID: map[string]any{"name": name}},
+	})
+	if err != nil {
+		return err
+	}
+	var out struct {
+		NotUpdated map[string]struct {
+			Type string `json:"type"`
+		} `json:"notUpdated"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("%w: decode Mailbox/set: %v", ErrUpstream, err)
+	}
+	if entry, ok := out.NotUpdated[mailboxID]; ok {
+		return mailboxSetError("rename", entry.Type)
+	}
+	return nil
+}
+
+// DestroyMailbox removes an empty mailbox. It never asks the server to remove
+// the mailbox's messages: onDestroyRemoveEmails is deliberately absent, so a
+// non-empty mailbox is refused rather than emptied.
+func (c *Client) DestroyMailbox(ctx context.Context, creds Credentials, accountID, mailboxID string) error {
+	raw, err := c.Call(ctx, creds, "Mailbox/set", map[string]any{
+		"accountId": accountID,
+		"destroy":   []string{mailboxID},
+	})
+	if err != nil {
+		return err
+	}
+	var out struct {
+		NotDestroyed map[string]struct {
+			Type string `json:"type"`
+		} `json:"notDestroyed"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("%w: decode Mailbox/set: %v", ErrUpstream, err)
+	}
+	if entry, ok := out.NotDestroyed[mailboxID]; ok {
+		return mailboxSetError("destroy", entry.Type)
+	}
+	return nil
+}
+
+// mailboxSetError maps a Mailbox/set refusal. The vendor type stays in the
+// error chain for logs and never reaches a response.
+func mailboxSetError(action, vendorType string) error {
+	switch vendorType {
+	case "alreadyExists":
+		return ErrAlreadyExists
+	case "invalidProperties":
+		return ErrInvalidInput
+	case "notFound":
+		return ErrNotFound
+	case "mailboxHasEmail", "mailboxHasChild":
+		return ErrMailboxNotEmpty
+	default:
+		return fmt.Errorf("%w: mailbox %s refused (%s)", ErrUpstream, action, vendorType)
+	}
 }
 
 // QueryEmails returns one page of message identifiers, newest first.
@@ -170,17 +272,31 @@ func (c *Client) Identities(ctx context.Context, creds Credentials, accountID st
 	return out.List, nil
 }
 
-// SetEmailKeywords patches the named keywords and leaves every other keyword
-// untouched. The patch is per-keyword on purpose: replacing the map would drop
-// $draft, $hasattachment, or a keyword another client set. Setting a keyword to
-// false removes it; that is how the server represents an unset flag.
-func (c *Client) SetEmailKeywords(ctx context.Context, creds Credentials, accountID, emailID string, read, starred *bool) error {
+// EmailPatch is a desired-state update to one message. A nil flag is left
+// unchanged. A non-empty MailboxID replaces the whole mailbox membership, so
+// the message ends up in exactly that mailbox; the server treats that as one
+// update and leaves keywords untouched.
+type EmailPatch struct {
+	Read      *bool
+	Starred   *bool
+	MailboxID string
+}
+
+// UpdateEmail applies one message update. Flags are sent as per-keyword
+// patches on purpose: replacing the keyword map would drop $draft,
+// $hasattachment, or a keyword another client set. Membership, when named, is
+// a full map because that is how the server expresses a move rather than a
+// copy.
+func (c *Client) UpdateEmail(ctx context.Context, creds Credentials, accountID, emailID string, patch EmailPatch) error {
 	update := map[string]any{}
-	if read != nil {
-		update["keywords/$seen"] = *read
+	if patch.Read != nil {
+		update["keywords/$seen"] = *patch.Read
 	}
-	if starred != nil {
-		update["keywords/$flagged"] = *starred
+	if patch.Starred != nil {
+		update["keywords/$flagged"] = *patch.Starred
+	}
+	if patch.MailboxID != "" {
+		update["mailboxIds"] = map[string]bool{patch.MailboxID: true}
 	}
 	if len(update) == 0 {
 		return nil
@@ -202,12 +318,16 @@ func (c *Client) SetEmailKeywords(ctx context.Context, creds Credentials, accoun
 		return fmt.Errorf("%w: decode Email/set: %v", ErrUpstream, err)
 	}
 	if entry, ok := out.NotUpdated[emailID]; ok {
-		if entry.Type == "notFound" {
+		switch entry.Type {
+		case "notFound":
 			return ErrNotFound
+		case "invalidProperties":
+			return ErrInvalidInput
+		default:
+			// The type is vendor vocabulary; it stays in the error chain for
+			// logs and never reaches a response.
+			return fmt.Errorf("%w: message update refused: %s", ErrUpstream, entry.Type)
 		}
-		// The type is vendor vocabulary; it stays in the error chain for logs
-		// and never reaches a response.
-		return fmt.Errorf("%w: keyword update refused: %s", ErrUpstream, entry.Type)
 	}
 	return nil
 }

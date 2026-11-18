@@ -33,6 +33,8 @@ const (
 	codeConflict           = "conflict"
 	codeInProgress         = "in_progress"
 	codeSendRejected       = "send_rejected"
+	codeAlreadyExists      = "already_exists"
+	codeMailboxNotEmpty    = "mailbox_not_empty"
 )
 
 // Service is the mail contract the HTTP layer depends on.
@@ -99,6 +101,7 @@ func New(service Service, opts Options) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/v1/mailboxes", s.protected(s.mailboxes))
+	mux.HandleFunc("/v1/mailboxes/{mailboxID}", s.protected(s.mailboxByID))
 	mux.HandleFunc("/v1/mailboxes/{mailboxID}/messages", s.protected(s.messages))
 	mux.HandleFunc("/v1/messages", s.protected(s.send))
 	mux.HandleFunc("/v1/messages/{messageID}", s.protected(s.messageByID))
@@ -231,6 +234,12 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, errorBody{Code: code, Message: message})
 }
 
+// writeNoContent answers a successful write that has no response body.
+func writeNoContent(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func writeUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Basic realm="mailflow", charset="UTF-8"`)
 	writeError(w, http.StatusUnauthorized, codeUnauthorized, "authentication required")
@@ -248,6 +257,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadRequest, codeInvalidCursor, "the cursor is no longer valid; restart from the first page")
 	case errors.Is(err, mail.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest, codeInvalidRequest, "the request is not valid for this account")
+	case errors.Is(err, mail.ErrAlreadyExists):
+		writeError(w, http.StatusConflict, codeAlreadyExists, "a mailbox with that name already exists")
+	case errors.Is(err, mail.ErrMailboxNotEmpty):
+		writeError(w, http.StatusConflict, codeMailboxNotEmpty, "the mailbox still holds messages or child mailboxes")
 	case errors.Is(err, mail.ErrRejected):
 		writeError(w, http.StatusUnprocessableEntity, codeSendRejected, "the message was not accepted for delivery")
 	case errors.Is(err, mail.ErrConflict):
