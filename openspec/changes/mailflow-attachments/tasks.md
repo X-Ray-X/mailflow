@@ -42,7 +42,7 @@
 - [x] 3.3 Cross-check one attachment over IMAP by fetching the same message's
   structure and body part, and confirm the bytes match the HTTP download;
   record the command and result in `docs/integration-surface.md`.
-- [ ] 3.4 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;
+- [x] 3.4 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;
   verify formatting, vet, unit tests, and all specs pass, and state any check
   that could not run. Review `git status` and the full diff for secrets,
   unbounded reads, unhandled errors, and data-loss paths, then commit on the
