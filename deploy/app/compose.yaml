@@ -67,6 +67,26 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  web:
+    # Static client only. It joins the application's internal network to proxy
+    # /v1 to the API; it has no access to the mail network or mail volumes.
+    image: ${MAILFLOW_WEB_IMAGE:?MAILFLOW_WEB_IMAGE must be set}
+    container_name: mailflow-web
+    init: true
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:${MAILFLOW_WEB_PORT:-8082}:80"
+    networks:
+      - data
+      - frontend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   db:
     # Pinned by exact release; the digest is recorded in
     # docs/application-database.md. PostgreSQL owns Mailflow application state
@@ -127,3 +147,7 @@ networks:
   data:
     name: mailflow-app-data
     internal: true
+  # The static client needs a non-internal network for its loopback port; it
+  # carries no database or mail traffic.
+  frontend:
+    name: mailflow-app-frontend

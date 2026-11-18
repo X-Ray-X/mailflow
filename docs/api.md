@@ -4,6 +4,9 @@ The Go service that publishes Mailflow's HTTP contract. It adapts to the mail
 server through JMAP and translates the result into Mailflow identifiers and
 vocabulary; nothing in a response is vendor-shaped.
 
+A first browser client consumes this contract; see
+[`docs/web-client.md`](web-client.md) for its scope and credential handling.
+
 The contract covers reads and writes: sending a plain-text message, saving and
 submitting drafts, replying to a message, reading and downloading attachments,
 searching mail by text, changing a message's read and starred flags, moving it
