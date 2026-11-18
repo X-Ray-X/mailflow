@@ -82,8 +82,9 @@ application deployments never recreate, upgrade, or reset mail infrastructure.
 
 Current state: the mail infrastructure is deployed and verified. The Go service
 publishes the read contract (mailboxes, message list, message content) and the
-first writes: sending a plain-text message and setting a message's read and
-starred flags. Mailbox changes, attachments, search, and push are later changes.
+writes: sending a plain-text message, setting a message's read and starred
+flags, moving and soft-deleting messages, and creating, renaming, and deleting
+custom mailboxes. Attachments, search, and push are later changes.
 
 ## Layout
 

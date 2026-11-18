@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/X-Ray-X/mailflow/app/internal/ids"
@@ -40,6 +41,13 @@ var (
 	// honoured for this account, such as a recipient outside the local mail
 	// domain. Nothing was submitted.
 	ErrInvalidInput = errors.New("request is not valid for this account")
+	// ErrAlreadyExists means a mailbox name is already in use. Create is
+	// deduplicated by name, so a retry after an unknown outcome answers this
+	// instead of making a second mailbox.
+	ErrAlreadyExists = errors.New("a mailbox with that name already exists")
+	// ErrMailboxNotEmpty means a mailbox still holds messages or child
+	// mailboxes, so deleting it would remove more than the caller asked for.
+	ErrMailboxNotEmpty = errors.New("mailbox is not empty")
 )
 
 // Credentials are forwarded to the mail server on every request and never
@@ -114,19 +122,29 @@ type OutgoingMessage struct {
 	Text    string
 }
 
-// FlagPatch is a desired-state flag update. A nil field is left unchanged, so
-// repeating a patch changes nothing.
-type FlagPatch struct {
-	Read    *bool
-	Starred *bool
+// MessagePatch is a desired-state message update. A nil field is left
+// unchanged, so repeating a patch changes nothing. A non-empty MailboxID moves
+// the message to exactly that mailbox; it is not a copy.
+type MessagePatch struct {
+	Read      *bool
+	Starred   *bool
+	MailboxID string
 }
 
 // Writer is the write side of the HTTP contract.
 type Writer interface {
 	// Send returns the Mailflow identifier of the sent message.
 	Send(ctx context.Context, creds Credentials, msg OutgoingMessage) (string, error)
-	// SetFlags applies the patch and returns the message's new summary.
-	SetFlags(ctx context.Context, creds Credentials, messageID string, patch FlagPatch) (MessageSummary, error)
+	// CreateMailbox returns the Mailflow identifier of the new mailbox.
+	CreateMailbox(ctx context.Context, creds Credentials, name string) (string, error)
+	// RenameMailbox changes a custom mailbox's name.
+	RenameMailbox(ctx context.Context, creds Credentials, mailboxID, name string) error
+	// DeleteMailbox removes an empty custom mailbox.
+	DeleteMailbox(ctx context.Context, creds Credentials, mailboxID string) error
+	// UpdateMessage applies the patch and returns the message's new summary.
+	UpdateMessage(ctx context.Context, creds Credentials, messageID string, patch MessagePatch) (MessageSummary, error)
+	// DeleteMessage moves the message to trash without erasing it.
+	DeleteMessage(ctx context.Context, creds Credentials, messageID string) error
 }
 
 // upstream is the part of the JMAP client the service uses. It is an interface
@@ -140,7 +158,10 @@ type upstream interface {
 	Identities(ctx context.Context, creds jmap.Credentials, accountID string) ([]jmap.Identity, error)
 	SendMessage(ctx context.Context, creds jmap.Credentials, accountID string, msg jmap.OutgoingEmail) (string, error)
 	DestroyEmails(ctx context.Context, creds jmap.Credentials, accountID string, ids ...string) error
-	SetEmailKeywords(ctx context.Context, creds jmap.Credentials, accountID, emailID string, read, starred *bool) error
+	UpdateEmail(ctx context.Context, creds jmap.Credentials, accountID, emailID string, patch jmap.EmailPatch) error
+	CreateMailbox(ctx context.Context, creds jmap.Credentials, accountID, name string) (string, error)
+	RenameMailbox(ctx context.Context, creds jmap.Credentials, accountID, mailboxID, name string) error
+	DestroyMailbox(ctx context.Context, creds jmap.Credentials, accountID, mailboxID string) error
 }
 
 // Service adapts the mail server to the Reader and Writer contracts.
@@ -400,9 +421,126 @@ func (s *Service) Send(ctx context.Context, creds Credentials, msg OutgoingMessa
 	return ids.Message(account, vendorID), nil
 }
 
-// SetFlags sets the stated flags and returns the updated summary. It patches
-// only the named keywords, so other attributes survive.
-func (s *Service) SetFlags(ctx context.Context, creds Credentials, messageID string, patch FlagPatch) (MessageSummary, error) {
+// CreateMailbox creates a top-level custom mailbox. The name is validated and
+// checked for a case-insensitive collision first, because the public list is
+// flat; the server's own duplicate check is the race backstop.
+func (s *Service) CreateMailbox(ctx context.Context, creds Credentials, name string) (string, error) {
+	name, err := validateMailboxName(name)
+	if err != nil {
+		return "", err
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
+	if err != nil {
+		return "", mapError(err)
+	}
+	if mailboxNameTaken(boxes, name, "") {
+		return "", ErrAlreadyExists
+	}
+
+	vendorID, err := s.upstream.CreateMailbox(ctx, toJMAP(creds), account, name)
+	if err != nil {
+		return "", mapError(err)
+	}
+	return ids.Mailbox(account, vendorID), nil
+}
+
+// RenameMailbox renames a custom mailbox. A standard mailbox is refused even
+// though the mail server permits it: clients find inbox, sent, drafts, trash,
+// and junk by role, and renaming one would break that.
+func (s *Service) RenameMailbox(ctx context.Context, creds Credentials, mailboxID, name string) error {
+	mailboxAccount, vendorMailbox, err := ids.ParseMailbox(mailboxID)
+	if err != nil {
+		return ErrNotFound
+	}
+	name, err = validateMailboxName(name)
+	if err != nil {
+		return err
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return err
+	}
+	if mailboxAccount != account {
+		return ErrNotFound
+	}
+
+	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
+	if err != nil {
+		return mapError(err)
+	}
+	target, ok := findMailbox(boxes, vendorMailbox)
+	if !ok {
+		return ErrNotFound
+	}
+	if !isCustomRole(target.Role) {
+		return fmt.Errorf("%w: a standard mailbox cannot be renamed", ErrInvalidInput)
+	}
+	if target.Name == name {
+		return nil
+	}
+	if mailboxNameTaken(boxes, name, vendorMailbox) {
+		return ErrAlreadyExists
+	}
+
+	if err := s.upstream.RenameMailbox(ctx, toJMAP(creds), account, vendorMailbox, name); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// DeleteMailbox removes an empty custom mailbox. It refuses a standard mailbox,
+// a mailbox that holds messages, and a mailbox with children, so nothing is
+// removed as a side effect.
+func (s *Service) DeleteMailbox(ctx context.Context, creds Credentials, mailboxID string) error {
+	mailboxAccount, vendorMailbox, err := ids.ParseMailbox(mailboxID)
+	if err != nil {
+		return ErrNotFound
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return err
+	}
+	if mailboxAccount != account {
+		return ErrNotFound
+	}
+
+	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
+	if err != nil {
+		return mapError(err)
+	}
+	target, ok := findMailbox(boxes, vendorMailbox)
+	if !ok {
+		return ErrNotFound
+	}
+	if !isCustomRole(target.Role) {
+		return fmt.Errorf("%w: a standard mailbox cannot be deleted", ErrInvalidInput)
+	}
+	if target.TotalEmails > 0 {
+		return ErrMailboxNotEmpty
+	}
+	for _, box := range boxes {
+		if box.ParentID == vendorMailbox {
+			return ErrMailboxNotEmpty
+		}
+	}
+
+	if err := s.upstream.DestroyMailbox(ctx, toJMAP(creds), account, vendorMailbox); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// UpdateMessage applies flags and an optional move in one upstream update, then
+// returns the message's new summary. The target mailbox must belong to the
+// caller; a foreign or unknown identifier is refused before the update.
+func (s *Service) UpdateMessage(ctx context.Context, creds Credentials, messageID string, patch MessagePatch) (MessageSummary, error) {
 	messageAccount, vendorMessage, err := ids.ParseMessage(messageID)
 	if err != nil {
 		return MessageSummary{}, ErrNotFound
@@ -415,8 +553,34 @@ func (s *Service) SetFlags(ctx context.Context, creds Credentials, messageID str
 	if messageAccount != account {
 		return MessageSummary{}, ErrNotFound
 	}
+	if patch.Read == nil && patch.Starred == nil && patch.MailboxID == "" {
+		return MessageSummary{}, fmt.Errorf("%w: at least one of read, starred, or mailboxId is required", ErrInvalidInput)
+	}
 
-	if err := s.upstream.SetEmailKeywords(ctx, toJMAP(creds), account, vendorMessage, patch.Read, patch.Starred); err != nil {
+	var vendorMailbox string
+	if patch.MailboxID != "" {
+		mailboxAccount, target, err := ids.ParseMailbox(patch.MailboxID)
+		if err != nil {
+			return MessageSummary{}, ErrNotFound
+		}
+		if mailboxAccount != account {
+			return MessageSummary{}, ErrNotFound
+		}
+		exists, err := s.upstream.MailboxExists(ctx, toJMAP(creds), account, target)
+		if err != nil {
+			return MessageSummary{}, mapError(err)
+		}
+		if !exists {
+			return MessageSummary{}, ErrNotFound
+		}
+		vendorMailbox = target
+	}
+
+	if err := s.upstream.UpdateEmail(ctx, toJMAP(creds), account, vendorMessage, jmap.EmailPatch{
+		Read:      patch.Read,
+		Starred:   patch.Starred,
+		MailboxID: vendorMailbox,
+	}); err != nil {
 		return MessageSummary{}, mapError(err)
 	}
 
@@ -428,6 +592,104 @@ func (s *Service) SetFlags(ctx context.Context, creds Credentials, messageID str
 		return MessageSummary{}, ErrNotFound
 	}
 	return MapSummary(account, list[0]), nil
+}
+
+// DeleteMessage moves a message to the account's trash mailbox. It never
+// destroys the message, so a delete is recoverable by moving it back out.
+func (s *Service) DeleteMessage(ctx context.Context, creds Credentials, messageID string) error {
+	messageAccount, vendorMessage, err := ids.ParseMessage(messageID)
+	if err != nil {
+		return ErrNotFound
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return err
+	}
+	if messageAccount != account {
+		return ErrNotFound
+	}
+
+	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
+	if err != nil {
+		return mapError(err)
+	}
+	var trash string
+	for _, box := range boxes {
+		if box.Role == "trash" {
+			trash = box.ID
+			break
+		}
+	}
+	if trash == "" {
+		return fmt.Errorf("%w: the account has no trash mailbox", ErrUnavailable)
+	}
+
+	if err := s.upstream.UpdateEmail(ctx, toJMAP(creds), account, vendorMessage, jmap.EmailPatch{MailboxID: trash}); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// maxMailboxNameBytes is the mail server's advertised limit and the contract's.
+const maxMailboxNameBytes = 255
+
+// validateMailboxName trims and checks a caller-supplied name. The rules are
+// stricter than the server's: the public list is flat, so a name containing
+// the IMAP hierarchy delimiter would be ambiguous to a standard client.
+func validateMailboxName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("%w: a mailbox name is required", ErrInvalidInput)
+	}
+	if len(name) > maxMailboxNameBytes {
+		return "", fmt.Errorf("%w: a mailbox name may be at most %d bytes", ErrInvalidInput, maxMailboxNameBytes)
+	}
+	if !utf8.ValidString(name) {
+		return "", fmt.Errorf("%w: a mailbox name must be valid UTF-8", ErrInvalidInput)
+	}
+	for _, r := range name {
+		if r == '/' || unicode.IsControl(r) {
+			return "", fmt.Errorf("%w: a mailbox name must not contain '/' or control characters", ErrInvalidInput)
+		}
+	}
+	return name, nil
+}
+
+// mailboxNameTaken reports a case-insensitive collision, ignoring the mailbox
+// being renamed. The server only rejects an exact duplicate at the same parent,
+// so this is the service's own stricter rule.
+func mailboxNameTaken(boxes []jmap.Mailbox, name, exceptID string) bool {
+	for _, box := range boxes {
+		if box.ID == exceptID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(box.Name), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func findMailbox(boxes []jmap.Mailbox, vendorID string) (jmap.Mailbox, bool) {
+	for _, box := range boxes {
+		if box.ID == vendorID {
+			return box, true
+		}
+	}
+	return jmap.Mailbox{}, false
+}
+
+// isCustomRole reports whether a mailbox may be renamed or deleted through the
+// service. A role the public model calls custom, including an absent one, is
+// allowed; the five standard roles are not.
+func isCustomRole(role string) bool {
+	switch role {
+	case "inbox", "sent", "drafts", "trash", "junk":
+		return false
+	default:
+		return true
+	}
 }
 
 // chooseIdentity picks the identity that belongs to the authenticated user.
@@ -515,6 +777,12 @@ func mapError(err error) error {
 		return ErrNotFound
 	case errors.Is(err, jmap.ErrAnchorNotFound):
 		return ErrInvalidCursor
+	case errors.Is(err, jmap.ErrAlreadyExists):
+		return ErrAlreadyExists
+	case errors.Is(err, jmap.ErrMailboxNotEmpty):
+		return ErrMailboxNotEmpty
+	case errors.Is(err, jmap.ErrInvalidInput):
+		return fmt.Errorf("%w: %v", ErrInvalidInput, err)
 	case errors.Is(err, jmap.ErrRejected):
 		return fmt.Errorf("%w: %v", ErrRejected, err)
 	case errors.Is(err, jmap.ErrTimeout), errors.Is(err, jmap.ErrUnavailable), errors.Is(err, jmap.ErrUpstream):
@@ -534,8 +802,7 @@ func mapError(err error) error {
 // for.
 func MapMailbox(account string, m jmap.Mailbox) Mailbox {
 	role := "custom"
-	switch m.Role {
-	case "inbox", "sent", "drafts", "trash", "junk":
+	if !isCustomRole(m.Role) {
 		role = m.Role
 	}
 	return Mailbox{

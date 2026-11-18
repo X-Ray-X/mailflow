@@ -71,6 +71,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) mailboxes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		s.listMailboxes(w, r)
+	case http.MethodPost:
+		s.createMailbox(w, r)
+	default:
+		writeMethodNotAllowed(w, "GET, HEAD, POST")
+	}
+}
+
+func (s *Server) listMailboxes(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return
 	}
@@ -90,6 +101,19 @@ func (s *Server) mailboxes(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// mailboxByID dispatches the methods the contract publishes on one mailbox:
+// rename it, or delete it when it is empty.
+func (s *Server) mailboxByID(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPatch:
+		s.renameMailbox(w, r)
+	case http.MethodDelete:
+		s.deleteMailbox(w, r)
+	default:
+		writeMethodNotAllowed(w, "PATCH, DELETE")
+	}
 }
 
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
@@ -123,15 +147,17 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 }
 
 // messageByID dispatches the methods the contract publishes on one message:
-// read it, or set its flags.
+// read it, patch its flags or mailbox, or delete it to trash.
 func (s *Server) messageByID(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 		s.message(w, r)
 	case http.MethodPatch:
-		s.setFlags(w, r)
+		s.updateMessage(w, r)
+	case http.MethodDelete:
+		s.deleteMessage(w, r)
 	default:
-		writeMethodNotAllowed(w, "GET, HEAD, PATCH")
+		writeMethodNotAllowed(w, "GET, HEAD, PATCH, DELETE")
 	}
 }
 

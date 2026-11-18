@@ -296,6 +296,76 @@ its own rejection without copying it.
   window after acceptance; the service treats acceptance as final and does not
   expose or call undo.
 
+### Mailbox organization (probed 2026-11-18)
+
+Exercised with `alice@mailflow.test` on the same pinned release. The account id
+was `c`; identifiers below are this account's, so they are examples, not stable
+values. The probe created, renamed, and destroyed mailboxes, moved a message,
+and read the results back with `Mailbox/get` and `Email/get`.
+
+- **`Mailbox/set` create, update (rename), and destroy all work.** Create takes
+  `name`, an optional `parentId`, and an optional `isSubscribed`. Rename is
+  `update` with `{"name": "..."}`. Destroy is `destroy: [id]` and removes the
+  mailbox when it is empty.
+- **`isSubscribed` defaults to `false`.** A mailbox created without it read back
+  as `isSubscribed: false`; setting it to `true` persisted. An unsubscribed
+  mailbox can be hidden by a standard client, so the adapter always sends
+  `true` on create.
+- **A duplicate name at the same parent is `notCreated`.** The entry has type
+  `alreadyExists` and carries an `existingId`. Creating the same name under a
+  different parent was not probed, so the vendor's exact scope is unrecorded.
+- **An empty name is `notCreated` with `invalidProperties`.** The same type is
+  returned when `parentId` names a mailbox that does not exist.
+- **Destroying a non-empty mailbox is refused.** Without extra arguments the
+  response is `notDestroyed` with type `mailboxHasEmail`. Destroying a mailbox
+  that has children is `notDestroyed` with type `mailboxHasChild`.
+- **`onDestroyRemoveEmails: true` destroys the messages with the mailbox.** The
+  probe confirmed the mailbox and the message inside it both disappeared. The
+  service never sends this flag.
+- **The server permits changing or removing standard mailboxes.** `Mailbox/get`
+  reports `mayRename` and `mayDelete` as `true` for inbox, sent, drafts, trash,
+  and junk. The service did not exercise a rename or destroy on a standard
+  mailbox; only the reported rights were observed.
+- **A role is writable but unique.** Setting a custom mailbox's role to
+  `archive` was accepted; setting it to `inbox` or `sent` was refused because
+  another mailbox already held that role. Mailflow never writes a role.
+- **A full `mailboxIds` map replaces membership in one call.** Sending
+  `{"mailboxIds": {"<target>": true}}` moved the message: the source id was gone
+  from the read-back map. Adding a target without removing the source left the
+  message in both, which is a copy, not a move. Moving to the mailbox the
+  message was already only in succeeded as a no-op.
+- **Keywords survive a membership replacement.** The probe read the message
+  before and after; `keywords` was unchanged by the move.
+- **A nonexistent move target is `notUpdated` with `invalidProperties`.** The
+  message stayed where it was. An unknown message id is reported the same way
+  with type `notFound`.
+- **Unexercised:** a create with a name that duplicates one under a different
+  parent, a rename that only changes case, and a destroy of a mailbox that is
+  both non-empty and has children (the first refusal is unrecorded). The service
+  does not depend on any of these.
+
+#### Standard-client visibility (verified 2026-11-18)
+
+A mailbox created through the Mailflow API and a message moved into it were
+listed over IMAPS as `bob@mailflow.test`, using Python's `imaplib` with the mail
+project's CA at `deploy/mail/data/tls/ca.pem`. The check mapped
+`mail.mailflow.test` to loopback for the connection while still verifying the
+certificate against the hostname:
+
+```python
+ctx = ssl.create_default_context(cafile="deploy/mail/data/tls/ca.pem")
+m = imaplib.IMAP4_SSL("mail.mailflow.test", 993, ssl_context=ctx)
+m.login(user, password)
+m.list()                       # showed the mailbox created over HTTP
+m.select('"IMAP Check <stamp>"', readonly=True)
+m.search(None, "ALL")          # returned the message moved over HTTP
+```
+
+`LIST` showed the new mailbox without a subscription step, `SELECT` opened it,
+and `SEARCH ALL` returned the moved message. After the message was moved back
+and the mailbox deleted through the API, a second `LIST` no longer showed it.
+The mailbox's role was absent, so the public model reports it as `custom`.
+
 ## Push notifications
 
 `eventSourceUrl` is a template with three parameters:
