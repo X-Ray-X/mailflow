@@ -94,7 +94,9 @@ attachment metadata and downloads) and the writes: sending a plain-text message,
 saving and submitting drafts, composing replies, setting a message's read and
 starred flags, moving and soft-deleting messages, and creating, renaming, and
 deleting custom mailboxes. A React web client covers the core flows through the
-same API. Uploading attachments and push are later changes.
+same API. Completed sends write a durable event to a PostgreSQL outbox; a Go
+worker publishes it through RabbitMQ on the private application network.
+Uploading attachments and push are later changes.
 
 ## Layout
 

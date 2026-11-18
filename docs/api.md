@@ -630,7 +630,10 @@ later must not assume the original result.
 An unfinished claim blocks its key for `MAILFLOW_IDEMPOTENCY_LEASE` (default 2
 minutes); after the lease a retry may take over, which bounds a duplicate but
 cannot prove the first attempt did not happen. Records live in the application
-database, not in the mail server; see
+database, not in the mail server. Completing one also writes a durable send
+event to an outbox that a Go worker publishes to RabbitMQ and records in an
+event table. This is asynchronous application bookkeeping: it cannot change a
+mailbox, delay a send, or alter the HTTP response; see
 [`docs/application-database.md`](application-database.md).
 
 ## Versioning

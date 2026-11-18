@@ -70,6 +70,26 @@ const schemaIndex = `
 CREATE INDEX IF NOT EXISTS send_idempotency_expires_at
     ON send_idempotency (expires_at)`
 
+// The outbox is application state only: it records that a send was accepted,
+// never what the message contains. The event table is the consumer's idempotent
+// projection of those events.
+const schemaOutbox = `
+CREATE TABLE IF NOT EXISTS send_outbox (
+    id           bigserial PRIMARY KEY,
+    account_name text        NOT NULL,
+    message_id   text        NOT NULL,
+    occurred_at  timestamptz NOT NULL DEFAULT now(),
+    published_at timestamptz
+)`
+
+const schemaEvents = `
+CREATE TABLE IF NOT EXISTS send_events (
+    event_id     bigint PRIMARY KEY,
+    account_name text        NOT NULL,
+    message_id   text        NOT NULL,
+    received_at  timestamptz NOT NULL DEFAULT now()
+)`
+
 // Open connects, verifies the connection, and creates the schema. A failure
 // here stops startup: the service cannot honour deduplication without it.
 func Open(ctx context.Context, cfg Config) (*Store, error) {
@@ -146,7 +166,7 @@ func (s *Store) bootstrap(ctx context.Context) error {
 		}
 	}()
 
-	for _, stmt := range []string{schemaTable, schemaIndex} {
+	for _, stmt := range []string{schemaTable, schemaIndex, schemaOutbox, schemaEvents} {
 		if _, err := conn.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("create application schema: %w", err)
 		}
@@ -234,8 +254,14 @@ func (s *Store) Claim(ctx context.Context, account, key string, requestHash []by
 }
 
 // Complete records a successful send. See idempotency.Recorder.
-func (s *Store) Complete(ctx context.Context, account, key, messageID string, ttl time.Duration) error {
-	tag, err := s.pool.Exec(ctx, `
+func (s *Store) Complete(ctx context.Context, account, key, messageID string, ttl time.Duration, event idempotency.SendEvent) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin send completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE send_idempotency
 		SET state = 'succeeded', message_id = $3, completed_at = now(),
 		    expires_at = now() + ($4::double precision * interval '1 second')
@@ -246,6 +272,77 @@ func (s *Store) Complete(ctx context.Context, account, key, messageID string, tt
 	}
 	if tag.RowsAffected() != 1 {
 		return errors.New("send record disappeared before it was completed")
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO send_outbox (account_name, message_id) VALUES ($1, $2)`,
+		event.Account, event.MessageID); err != nil {
+		return fmt.Errorf("record send event: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit send completion: %w", err)
+	}
+	return nil
+}
+
+// OutboxEvent is one unpublished row. Only identifiers cross this boundary.
+type OutboxEvent struct {
+	ID        int64
+	Account   string
+	MessageID string
+}
+
+// Unpublished returns the oldest bounded batch of events still awaiting
+// publication. A batch is never unbounded, so one poll cannot monopolise the
+// worker.
+func (s *Store) Unpublished(ctx context.Context, limit int) ([]OutboxEvent, error) {
+	if limit < 1 || limit > 100 {
+		return nil, errors.New("outbox batch size out of range")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, account_name, message_id FROM send_outbox
+		WHERE published_at IS NULL ORDER BY id LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read outbox: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]OutboxEvent, 0, limit)
+	for rows.Next() {
+		var event OutboxEvent
+		if err := rows.Scan(&event.ID, &event.Account, &event.MessageID); err != nil {
+			return nil, fmt.Errorf("scan outbox row: %w", err)
+		}
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+// MarkPublished records that the broker accepted a bounded batch.
+func (s *Store) MarkPublished(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 || len(ids) > 100 {
+		return errors.New("published batch size out of range")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE send_outbox SET published_at = now() WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("mark outbox published: %w", err)
+	}
+	if int(tag.RowsAffected()) != len(ids) {
+		return errors.New("outbox row disappeared before it was marked published")
+	}
+	return nil
+}
+
+// RecordEvent stores a consumed event once. Delivery is at least once, so a
+// repeated delivery must be a no-op rather than a duplicate row.
+func (s *Store) RecordEvent(ctx context.Context, event OutboxEvent) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO send_events (event_id, account_name, message_id)
+		VALUES ($1, $2, $3) ON CONFLICT (event_id) DO NOTHING`,
+		event.ID, event.Account, event.MessageID)
+	if err != nil {
+		return fmt.Errorf("record consumed event: %w", err)
 	}
 	return nil
 }
