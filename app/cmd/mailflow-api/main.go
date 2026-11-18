@@ -14,6 +14,7 @@ import (
 	"github.com/X-Ray-X/mailflow/app/internal/config"
 	"github.com/X-Ray-X/mailflow/app/internal/jmap"
 	"github.com/X-Ray-X/mailflow/app/internal/mail"
+	"github.com/X-Ray-X/mailflow/app/internal/observability"
 	"github.com/X-Ray-X/mailflow/app/internal/store"
 )
 
@@ -58,6 +59,18 @@ func run() error {
 	}
 	defer db.Close()
 
+	obs, err := observability.New(context.Background(), cfg.OTLPEndpoint, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := obs.Shutdown(shutdownCtx); err != nil {
+			log.Warn("observability shutdown failed", "error", err)
+		}
+	}()
+
 	service := mail.NewService(client, cfg.PageSizeDefault, cfg.PageSizeMax, cfg.BodyMaxBytes, log)
 	server := api.New(service, api.Options{
 		Timeout:           cfg.RequestTimeout,
@@ -68,11 +81,12 @@ func run() error {
 		IdempotencyLease:  cfg.IdempotencyLease,
 		SendMaxRecipients: cfg.SendMaxRecipients,
 		SendMaxBytes:      cfg.SendMaxBytes,
+		MetricsHandler:    obs.Metrics,
 	})
 
 	httpServer := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           server.Handler(),
+		Handler:           obs.Wrap(server.Handler()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout + 5*time.Second,
 		WriteTimeout:      cfg.RequestTimeout + 5*time.Second,

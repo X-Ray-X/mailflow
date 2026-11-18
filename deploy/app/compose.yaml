@@ -39,6 +39,8 @@ services:
       MAILFLOW_IDEMPOTENCY_LEASE: ${MAILFLOW_IDEMPOTENCY_LEASE:-2m}
       MAILFLOW_SEND_MAX_RECIPIENTS: ${MAILFLOW_SEND_MAX_RECIPIENTS:-50}
       MAILFLOW_SEND_MAX_BYTES: ${MAILFLOW_SEND_MAX_BYTES:-262144}
+      # Optional OTLP trace export. Empty disables it without failing startup.
+      MAILFLOW_OTEL_EXPORTER_OTLP_ENDPOINT: ${MAILFLOW_OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
     ports:
       # Host loopback only. Widening this belongs to the change that adds a
@@ -84,6 +86,51 @@ services:
       retries: 5
     ports:
       - "127.0.0.1:${MAILFLOW_WEB_PORT:-8082}:80"
+    networks:
+      - data
+      - frontend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    # Scrapes the API's loopback listener from inside the app network.
+    image: ${PROMETHEUS_IMAGE:?PROMETHEUS_IMAGE must be set}
+    container_name: mailflow-prometheus
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - data
+      - frontend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    # Read-only dashboard. No admin credential is created: the port is loopback.
+    image: ${GRAFANA_IMAGE:?GRAFANA_IMAGE must be set}
+    container_name: mailflow-grafana
+    init: true
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/provisioning/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     networks:
       - data
       - frontend
@@ -205,6 +252,9 @@ volumes:
   # Broker state only; it holds identifiers, never mailbox content.
   rabbit:
     name: mailflow-app-rabbit
+  # Prometheus history only. No mail or application state.
+  prometheus:
+    name: mailflow-app-prometheus
 
 networks:
   mail:

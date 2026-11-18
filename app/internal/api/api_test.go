@@ -2085,3 +2085,23 @@ func TestSearchRequiresGet(t *testing.T) {
 		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
 }
+
+func TestMetricsAreUnauthenticatedAndSeparateFromV1(t *testing.T) {
+	metrics := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte("http_server_request_count 1\n"))
+	})
+	srv := newTestServer(t, &fakeReader{}, Options{MetricsHandler: metrics})
+
+	resp := request(t, srv, http.MethodGet, "/metrics", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := string(body(t, resp)); !strings.Contains(got, "http_server_request_count") {
+		t.Fatalf("metrics body = %q", got)
+	}
+	resp = request(t, srv, http.MethodGet, "/v1/mailboxes", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("protected route status = %d, want 401", resp.StatusCode)
+	}
+}

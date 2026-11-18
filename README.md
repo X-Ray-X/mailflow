@@ -157,6 +157,8 @@ docker compose up -d
 | Mailflow API, loopback only | `http://127.0.0.1:8080/v1/` |
 | Health | `http://127.0.0.1:8080/healthz` |
 | Web client, loopback only | `http://127.0.0.1:8082/` |
+| Metrics, loopback only | `http://127.0.0.1:8080/metrics` |
+| Prometheus / Grafana, loopback only | `http://127.0.0.1:9090/`, `http://127.0.0.1:3000/` |
 | PostgreSQL | private to the app Compose project, no published port |
 
 The database holds idempotency records for sending; it never holds mail. Its
@@ -189,6 +191,7 @@ at `deploy/mail/data/tls/ca.pem`. Do not disable certificate verification.
 - Observed JMAP surface, capabilities, events: [`docs/integration-surface.md`](docs/integration-surface.md)
 - Published contract, configuration, run recipe: [`docs/api.md`](docs/api.md)
 - Application database, pin, backup/restore, retention: [`docs/application-database.md`](docs/application-database.md)
+- Metrics, tracing, dashboards: [`docs/observability.md`](docs/observability.md)
 
 ## Specifications
 
