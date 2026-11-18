@@ -61,11 +61,13 @@ No public identifier is invented and no application state mirrors mail.
 ### Draft submission reuses the existing idempotency record
 
 `POST /v1/drafts/{id}/send` claims the same `send_idempotency` row a send uses.
-The request hash covers the operation, the draft identifier, and the draft's
-current recipients, subject, and body, so the same key with a different draft or
-different content is `conflict` rather than a silent second submission. A replay
-returns the recorded Mailflow identifier and submits nothing. The record store
-stays application state; no table is added.
+The request hash covers the operation and the draft identifier. The probe
+showed draft content is immutable at the mail server, so the identifier already
+identifies the message: hashing a second copy of the content would need an extra
+read and protect nothing a different identifier does not. The same key with a
+different draft is therefore `conflict` rather than a silent second submission.
+A replay returns the recorded Mailflow identifier and submits nothing. The
+record store stays application state; no table is added.
 
 Draft creation and reply composition do not require a key. They have no external
 side effect, and a duplicate is visible and recoverable by deleting it. Adding a

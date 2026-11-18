@@ -56,6 +56,21 @@ type mailboxResponse struct {
 	ID string `json:"id"`
 }
 
+type draftRequest struct {
+	To      []addressDTO `json:"to"`
+	Cc      []addressDTO `json:"cc"`
+	Subject string       `json:"subject"`
+	Text    string       `json:"text"`
+}
+
+type replyRequest struct {
+	Text string `json:"text"`
+}
+
+type draftResponse struct {
+	ID string `json:"id"`
+}
+
 // send accepts a plain-text message for delivery. The idempotency claim comes
 // first, so a retry cannot submit twice, and it is released only when the send
 // certainly did not happen.
@@ -371,4 +386,169 @@ func (s *Server) complete(account, key, messageID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
 	return s.records.Complete(ctx, account, key, messageID, s.idemTTL)
+}
+
+// drafts accepts a new draft. Draft creation is mailbox state with no external
+// side effect, so it takes no idempotency key; a duplicate is visible and can be
+// deleted.
+func (s *Server) drafts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var req draftRequest
+	if err := decodeJSON(w, r, &req, s.sendBodyLimit()); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	draft, err := s.validateDraft(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+
+	id, err := s.service.CreateDraft(r.Context(), credentials(r.Context()), draft)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, draftResponse{ID: id})
+}
+
+// sendDraft submits an existing draft. It is a send, so it claims the same
+// idempotency record a send does: a replay returns the recorded identifier and
+// a key reused for another draft is refused.
+func (s *Server) sendDraft(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	key, err := idempotencyKey(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+
+	draftID := r.PathValue("draftID")
+	hash, err := draftSendHash(draftID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	if s.records == nil {
+		// Fail closed, exactly as sending does: an unrecorded submission could
+		// be repeated by a retry.
+		s.log.Error("draft submission refused: no idempotency record store configured")
+		writeError(w, http.StatusServiceUnavailable, codeServiceUnavailable, "sending is unavailable")
+		return
+	}
+
+	creds := credentials(r.Context())
+	claim, err := s.records.Claim(r.Context(), creds.User, key, hash, s.idemTTL, s.idemLease)
+	if err != nil {
+		s.log.Error("could not claim the idempotency key", "error", err)
+		writeError(w, http.StatusServiceUnavailable, codeServiceUnavailable, "sending is unavailable")
+		return
+	}
+
+	switch claim.State {
+	case idempotency.Replay:
+		w.Header().Set("Idempotency-Replayed", "true")
+		writeJSON(w, http.StatusCreated, draftResponse{ID: claim.MessageID})
+		return
+	case idempotency.Mismatch:
+		writeError(w, http.StatusConflict, codeConflict, "the idempotency key was already used for a different request")
+		return
+	case idempotency.InFlight:
+		writeError(w, http.StatusConflict, codeInProgress, "a send with this idempotency key is already in progress")
+		return
+	}
+
+	id, err := s.service.SendDraft(r.Context(), creds, draftID)
+	if err != nil {
+		// A refusal, a non-draft, or an unknown identifier all mean nothing was
+		// submitted, so the caller may retry with the same key once the input is
+		// corrected.
+		if errors.Is(err, mail.ErrRejected) || errors.Is(err, mail.ErrInvalidInput) || errors.Is(err, mail.ErrNotFound) {
+			s.release(creds.User, key)
+		}
+		s.fail(w, r, err)
+		return
+	}
+
+	if err := s.complete(creds.User, key, id); err != nil {
+		s.log.Error("could not record the completed draft submission", "error", err)
+	}
+	writeJSON(w, http.StatusCreated, draftResponse{ID: id})
+}
+
+// reply composes a draft answer to a message. It creates mailbox state rather
+// than submitting anything, so it takes no idempotency key.
+func (s *Server) reply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	var req replyRequest
+	if err := decodeJSON(w, r, &req, s.sendBodyLimit()); err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	if s.sendMaxBytes > 0 && int64(len(req.Text)) > s.sendMaxBytes {
+		writeError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf("the text body may be at most %d bytes", s.sendMaxBytes))
+		return
+	}
+
+	id, err := s.service.Reply(r.Context(), credentials(r.Context()), r.PathValue("messageID"), req.Text)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, draftResponse{ID: id})
+}
+
+// validateDraft applies the same shape, recipient-count, and body-size bounds a
+// send does, but requires no recipient: an unfinished draft is the point.
+func (s *Server) validateDraft(req draftRequest) (mail.Draft, error) {
+	to := toMailAddresses(req.To)
+	cc := toMailAddresses(req.Cc)
+
+	recipients := len(to) + len(cc)
+	if s.sendMaxRecipients > 0 && recipients > s.sendMaxRecipients {
+		return mail.Draft{}, fmt.Errorf("a draft may name at most %d recipients", s.sendMaxRecipients)
+	}
+	if s.sendMaxBytes > 0 && int64(len(req.Text)) > s.sendMaxBytes {
+		return mail.Draft{}, fmt.Errorf("the text body may be at most %d bytes", s.sendMaxBytes)
+	}
+	for _, address := range append(append([]mail.Address{}, to...), cc...) {
+		if !validAddress(address.Email) {
+			return mail.Draft{}, fmt.Errorf("%q is not a valid e-mail address", address.Email)
+		}
+	}
+
+	return mail.Draft{
+		To:      to,
+		Cc:      cc,
+		Subject: req.Subject,
+		Text:    req.Text,
+	}, nil
+}
+
+// draftSendHash is the canonical fingerprint of a draft submission. The draft
+// identifier is enough to identify the request: draft content is immutable, so
+// one identifier always means one message.
+func draftSendHash(draftID string) ([]byte, error) {
+	encoded, err := json.Marshal(struct {
+		Operation string `json:"operation"`
+		DraftID   string `json:"draftId"`
+	}{Operation: "draft.send", DraftID: draftID})
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint draft submission: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return sum[:], nil
 }

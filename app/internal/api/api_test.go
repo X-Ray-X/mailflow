@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -34,15 +35,21 @@ type fakeReader struct {
 	messagesFn  func(context.Context) (mail.Page, error)
 	messageFn   func(context.Context) (mail.Message, error)
 
-	sendFn      func(context.Context, mail.OutgoingMessage) (string, error)
-	updateFn    func(context.Context, string, mail.MessagePatch) (mail.MessageSummary, error)
-	deleteMsgFn func(context.Context, string) error
+	sendFn        func(context.Context, mail.OutgoingMessage) (string, error)
+	createDraftFn func(context.Context, mail.Draft) (string, error)
+	sendDraftFn   func(context.Context, string) (string, error)
+	replyFn       func(context.Context, string, string) (string, error)
+	updateFn      func(context.Context, string, mail.MessagePatch) (mail.MessageSummary, error)
+	deleteMsgFn   func(context.Context, string) error
 
 	createMailboxFn func(context.Context, string) (string, error)
 	renameMailboxFn func(context.Context, string, string) error
 	deleteMailboxFn func(context.Context, string) error
 
 	gotSend        mail.OutgoingMessage
+	gotDraft       mail.Draft
+	gotDraftID     string
+	gotReplyText   string
 	gotMessageID   string
 	gotPatch       mail.MessagePatch
 	gotMailboxID   string
@@ -96,6 +103,43 @@ func (f *fakeReader) Send(ctx context.Context, creds mail.Credentials, msg mail.
 	f.mu.Unlock()
 	if f.sendFn != nil {
 		return f.sendFn(ctx, msg)
+	}
+	return "", nil
+}
+
+func (f *fakeReader) CreateDraft(ctx context.Context, creds mail.Credentials, draft mail.Draft) (string, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotDraft = draft
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.createDraftFn != nil {
+		return f.createDraftFn(ctx, draft)
+	}
+	return "", nil
+}
+
+func (f *fakeReader) SendDraft(ctx context.Context, creds mail.Credentials, draftID string) (string, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotDraftID = draftID
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.sendDraftFn != nil {
+		return f.sendDraftFn(ctx, draftID)
+	}
+	return "", nil
+}
+
+func (f *fakeReader) Reply(ctx context.Context, creds mail.Credentials, messageID, text string) (string, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotMessageID = messageID
+	f.gotReplyText = text
+	f.writeCalls++
+	f.mu.Unlock()
+	if f.replyFn != nil {
+		return f.replyFn(ctx, messageID, text)
 	}
 	return "", nil
 }
@@ -172,6 +216,12 @@ func (f *fakeReader) writeSnapshot() (mail.OutgoingMessage, string, mail.Message
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.gotSend, f.gotMessageID, f.gotPatch, f.writeCalls
+}
+
+func (f *fakeReader) draftSnapshot() (mail.Draft, string, string, string, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gotDraft, f.gotDraftID, f.gotReplyText, f.gotMessageID, f.writeCalls
 }
 
 func (f *fakeReader) mailboxSnapshot() (string, string) {
@@ -1301,5 +1351,399 @@ func TestMessagePathRejectsUnsupportedMethods(t *testing.T) {
 	allow := resp.Header.Get("Allow")
 	if !strings.Contains(allow, "PATCH") || !strings.Contains(allow, "GET") || !strings.Contains(allow, "DELETE") {
 		t.Fatalf("Allow = %q", allow)
+	}
+}
+
+const validDraftBody = `{"to":[{"email":"alice@example.test"}],"cc":[{"email":"carol@example.test"}],"subject":"Lunch","text":"Noon?"}`
+
+func TestCreateDraftSavesWithoutAnIdempotencyKey(t *testing.T) {
+	f := &fakeReader{createDraftFn: func(context.Context, mail.Draft) (string, error) {
+		return "draft1", nil
+	}}
+	// No record store: mailbox state needs no deduplication.
+	srv := newTestServer(t, f, Options{SendMaxRecipients: 50, SendMaxBytes: 1024})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts", "", validDraftBody, &testCreds)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body(t, resp))
+	}
+	var got draftResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != "draft1" {
+		t.Fatalf("id = %q", got.ID)
+	}
+	draft, _, _, _, calls := f.draftSnapshot()
+	if calls != 1 {
+		t.Fatalf("service calls = %d", calls)
+	}
+	if len(draft.To) != 1 || draft.To[0].Email != "alice@example.test" {
+		t.Fatalf("to = %+v", draft.To)
+	}
+	if len(draft.Cc) != 1 || draft.Cc[0].Email != "carol@example.test" {
+		t.Fatalf("cc = %+v", draft.Cc)
+	}
+	if draft.Subject != "Lunch" || draft.Text != "Noon?" {
+		t.Fatalf("content = %+v", draft)
+	}
+}
+
+func TestCreateDraftAllowsAnEmptyDraft(t *testing.T) {
+	f := &fakeReader{createDraftFn: func(context.Context, mail.Draft) (string, error) {
+		return "draft1", nil
+	}}
+	srv := newTestServer(t, f, Options{SendMaxRecipients: 50, SendMaxBytes: 1024})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts", "", `{}`, &testCreds)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body(t, resp))
+	}
+	draft, _, _, _, _ := f.draftSnapshot()
+	if len(draft.To) != 0 || len(draft.Cc) != 0 || draft.Subject != "" || draft.Text != "" {
+		t.Fatalf("empty draft = %+v", draft)
+	}
+}
+
+func TestCreateDraftRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name    string
+		options Options
+		payload string
+	}{
+		{
+			name:    "unknown field",
+			payload: `{"subject":"Hi","text":"x","seen":true}`,
+		},
+		{
+			name:    "invalid address",
+			payload: `{"to":[{"email":"not-an-address"}],"subject":"Hi"}`,
+		},
+		{
+			name:    "too many recipients",
+			options: Options{SendMaxRecipients: 1},
+			payload: `{"to":[{"email":"a@example.test"},{"email":"b@example.test"}]}`,
+		},
+		{
+			name:    "body too large",
+			options: Options{SendMaxBytes: 2},
+			payload: `{"subject":"Hi","text":"three"}`,
+		},
+		{
+			name:    "missing body",
+			payload: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{}
+			srv := newTestServer(t, f, tc.options)
+			resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts", "", tc.payload, &testCreds)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, body(t, resp))
+			}
+			if got := decodeError(t, resp); got.Code != codeInvalidRequest {
+				t.Fatalf("error = %+v, want %q", got, codeInvalidRequest)
+			}
+			if _, _, _, _, calls := f.draftSnapshot(); calls != 0 {
+				t.Fatalf("saved a draft from bad input: %d calls", calls)
+			}
+		})
+	}
+}
+
+func TestCreateDraftRequiresPost(t *testing.T) {
+	srv := newTestServer(t, &fakeReader{}, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/drafts", &testCreds)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+	if allow := resp.Header.Get("Allow"); allow != http.MethodPost {
+		t.Fatalf("Allow = %q", allow)
+	}
+}
+
+func TestSendDraftClaimsAndRecords(t *testing.T) {
+	rec := &fakeRecorder{claim: idempotency.Claim{State: idempotency.Claimed}}
+	f := &fakeReader{sendDraftFn: func(context.Context, string) (string, error) {
+		return "draft1", nil
+	}}
+	srv := newTestServer(t, f, Options{Records: rec})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts/draft1/send", "key-1", "", &testCreds)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body(t, resp))
+	}
+	if replay := resp.Header.Get("Idempotency-Replayed"); replay != "" {
+		t.Fatalf("Idempotency-Replayed = %q on a first submission", replay)
+	}
+	var got draftResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != "draft1" {
+		t.Fatalf("id = %q", got.ID)
+	}
+	claims, account, key, hash, completed, released := rec.snapshot()
+	if claims != 1 || account != testCreds.User || key != "key-1" {
+		t.Fatalf("claim = %d account %q key %q", claims, account, key)
+	}
+	if len(hash) != sha256.Size {
+		t.Fatalf("hash length = %d, want %d", len(hash), sha256.Size)
+	}
+	if len(completed) != 1 || completed[0] != "draft1" {
+		t.Fatalf("completed = %v", completed)
+	}
+	if len(released) != 0 {
+		t.Fatalf("released = %v after a successful submission", released)
+	}
+	_, draftID, _, _, calls := f.draftSnapshot()
+	if calls != 1 || draftID != "draft1" {
+		t.Fatalf("service call = %d draft %q", calls, draftID)
+	}
+}
+
+func TestSendDraftHashDependsOnTheDraft(t *testing.T) {
+	a, err := draftSendHash("draft1")
+	if err != nil {
+		t.Fatalf("draftSendHash: %v", err)
+	}
+	b, err := draftSendHash("draft2")
+	if err != nil {
+		t.Fatalf("draftSendHash: %v", err)
+	}
+	if string(a) == string(b) {
+		t.Fatal("different drafts produced the same fingerprint")
+	}
+}
+
+func TestSendDraftReplayAndKeyStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		state  idempotency.State
+		status int
+		code   string
+		replay string
+	}{
+		{"replay", idempotency.Replay, http.StatusCreated, "", "true"},
+		{"conflict", idempotency.Mismatch, http.StatusConflict, codeConflict, ""},
+		{"in flight", idempotency.InFlight, http.StatusConflict, codeInProgress, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{claim: idempotency.Claim{State: tc.state, MessageID: "draft_old"}}
+			f := &fakeReader{sendDraftFn: func(context.Context, string) (string, error) {
+				t.Fatal("a refused duplicate reached the mail service")
+				return "", nil
+			}}
+			srv := newTestServer(t, f, Options{Records: rec})
+
+			resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts/draft1/send", "key-1", "", &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.status, body(t, resp))
+			}
+			if got := resp.Header.Get("Idempotency-Replayed"); got != tc.replay {
+				t.Fatalf("Idempotency-Replayed = %q, want %q", got, tc.replay)
+			}
+			if tc.code != "" {
+				if got := decodeError(t, resp); got.Code != tc.code {
+					t.Fatalf("error = %+v, want %q", got, tc.code)
+				}
+			} else {
+				var got draftResponse
+				if err := json.Unmarshal(body(t, resp), &got); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if got.ID != "draft_old" {
+					t.Fatalf("id = %q, want the recorded identifier", got.ID)
+				}
+			}
+			if _, _, _, _, calls := f.draftSnapshot(); calls != 0 {
+				t.Fatal("a refused duplicate reached the mail service")
+			}
+		})
+	}
+}
+
+func TestSendDraftRequiresAKey(t *testing.T) {
+	rec := &fakeRecorder{claim: idempotency.Claim{State: idempotency.Claimed}}
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{Records: rec})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts/draft1/send", "", "", &testCreds)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if got := decodeError(t, resp); got.Code != codeInvalidRequest {
+		t.Fatalf("error = %+v", got)
+	}
+	if claims, _, _, _, _, _ := rec.snapshot(); claims != 0 {
+		t.Fatalf("claimed a key without one: %d", claims)
+	}
+	if _, _, _, _, calls := f.draftSnapshot(); calls != 0 {
+		t.Fatal("submitted without an idempotency key")
+	}
+}
+
+func TestSendDraftRefusalsReleaseTheClaim(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"empty draft", fmt.Errorf("%w: the draft has no recipient", mail.ErrInvalidInput), http.StatusBadRequest, codeInvalidRequest},
+		{"not a draft", fmt.Errorf("%w: the message is not a draft", mail.ErrInvalidInput), http.StatusBadRequest, codeInvalidRequest},
+		{"declined", fmt.Errorf("%w: refusal", mail.ErrRejected), http.StatusUnprocessableEntity, codeSendRejected},
+		{"foreign identifier", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &fakeRecorder{claim: idempotency.Claim{State: idempotency.Claimed}}
+			f := &fakeReader{sendDraftFn: func(context.Context, string) (string, error) {
+				return "", tc.err
+			}}
+			srv := newTestServer(t, f, Options{Records: rec})
+
+			resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts/draft1/send", "key-1", "", &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d: %s", resp.StatusCode, tc.status, body(t, resp))
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+			_, _, _, _, _, released := rec.snapshot()
+			if len(released) != 1 || released[0] != "key-1" {
+				t.Fatalf("released = %v, want the claimed key", released)
+			}
+		})
+	}
+}
+
+func TestSendDraftKeepsTheClaimWhenTheOutcomeIsUnknown(t *testing.T) {
+	rec := &fakeRecorder{claim: idempotency.Claim{State: idempotency.Claimed}}
+	f := &fakeReader{sendDraftFn: func(context.Context, string) (string, error) {
+		return "", mail.ErrUnavailable
+	}}
+	srv := newTestServer(t, f, Options{Records: rec})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts/draft1/send", "key-1", "", &testCreds)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	_, _, _, _, _, released := rec.snapshot()
+	if len(released) != 0 {
+		t.Fatalf("released a claim whose outcome is unknown: %v", released)
+	}
+}
+
+func TestSendDraftFailsClosedWithoutARecordStore(t *testing.T) {
+	f := &fakeReader{sendDraftFn: func(context.Context, string) (string, error) {
+		t.Fatal("submitted without a record store")
+		return "", nil
+	}}
+	srv := newTestServer(t, f, Options{})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/drafts/draft1/send", "key-1", "", &testCreds)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+	if got := decodeError(t, resp); got.Code != codeServiceUnavailable {
+		t.Fatalf("error = %+v", got)
+	}
+}
+
+func TestSendDraftRequiresPost(t *testing.T) {
+	srv := newTestServer(t, &fakeReader{}, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/drafts/draft1/send", &testCreds)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+}
+
+func TestReplyCreatesADraft(t *testing.T) {
+	f := &fakeReader{replyFn: func(context.Context, string, string) (string, error) {
+		return "reply1", nil
+	}}
+	srv := newTestServer(t, f, Options{SendMaxBytes: 1024})
+
+	resp := requestJSON(t, srv, http.MethodPost, "/v1/messages/msg1/reply", "", `{"text":"Sounds good."}`, &testCreds)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", resp.StatusCode, body(t, resp))
+	}
+	var got draftResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != "reply1" {
+		t.Fatalf("id = %q", got.ID)
+	}
+	_, _, text, messageID, calls := f.draftSnapshot()
+	if calls != 1 || messageID != "msg1" || text != "Sounds good." {
+		t.Fatalf("service call = %d message %q text %q", calls, messageID, text)
+	}
+}
+
+func TestReplyRejectsBadInput(t *testing.T) {
+	cases := []struct {
+		name    string
+		options Options
+		payload string
+	}{
+		{name: "unknown field", payload: `{"text":"hi","quote":true}`},
+		{name: "body too large", options: Options{SendMaxBytes: 2}, payload: `{"text":"three"}`},
+		{name: "missing body", payload: ""},
+		{name: "wrong type", payload: `{"text":7}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{}
+			srv := newTestServer(t, f, tc.options)
+			resp := requestJSON(t, srv, http.MethodPost, "/v1/messages/msg1/reply", "", tc.payload, &testCreds)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, body(t, resp))
+			}
+			if got := decodeError(t, resp); got.Code != codeInvalidRequest {
+				t.Fatalf("error = %+v", got)
+			}
+			if _, _, _, _, calls := f.draftSnapshot(); calls != 0 {
+				t.Fatalf("created a reply from bad input: %d calls", calls)
+			}
+		})
+	}
+}
+
+func TestReplyRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"foreign message", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+		{"no sender", fmt.Errorf("%w: the message has no sender", mail.ErrInvalidInput), http.StatusBadRequest, codeInvalidRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{replyFn: func(context.Context, string, string) (string, error) {
+				return "", tc.err
+			}}
+			srv := newTestServer(t, f, Options{})
+			resp := requestJSON(t, srv, http.MethodPost, "/v1/messages/msg1/reply", "", `{"text":"hi"}`, &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestReplyRequiresPost(t *testing.T) {
+	srv := newTestServer(t, &fakeReader{}, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/messages/msg1/reply", &testCreds)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
 }

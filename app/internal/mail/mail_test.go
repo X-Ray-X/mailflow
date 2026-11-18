@@ -44,6 +44,28 @@ type fakeUpstream struct {
 	sent      jmap.OutgoingEmail
 	sendCalls int
 
+	draftID    string
+	draftErr   error
+	draft      jmap.DraftContent
+	draftCalls int
+
+	getDraft    jmap.Email
+	getDraftErr error
+	getDraftID  string
+
+	sendDraftErr        error
+	sendDraftCalls      int
+	sendDraftID         string
+	sendDraftDrafts     string
+	sendDraftSent       string
+	sendDraftIdentity   string
+	sendDraftFrom       jmap.Address
+	sendDraftRecipients []jmap.Address
+
+	replySource    jmap.Email
+	replySourceErr error
+	replySourceID  string
+
 	destroyed  []string
 	destroyErr error
 
@@ -119,6 +141,37 @@ func (f *fakeUpstream) SendMessage(_ context.Context, _ jmap.Credentials, accoun
 	f.sent = msg
 	f.sendCalls++
 	return f.sendID, f.sendErr
+}
+
+func (f *fakeUpstream) CreateDraft(_ context.Context, _ jmap.Credentials, accountID string, draft jmap.DraftContent) (string, error) {
+	f.gotAccount = accountID
+	f.draft = draft
+	f.draftCalls++
+	return f.draftID, f.draftErr
+}
+
+func (f *fakeUpstream) SendDraft(_ context.Context, _ jmap.Credentials, accountID, draftsMailboxID, sentMailboxID, identityID, emailID string, from jmap.Address, recipients []jmap.Address) error {
+	f.gotAccount = accountID
+	f.sendDraftCalls++
+	f.sendDraftID = emailID
+	f.sendDraftDrafts = draftsMailboxID
+	f.sendDraftSent = sentMailboxID
+	f.sendDraftIdentity = identityID
+	f.sendDraftFrom = from
+	f.sendDraftRecipients = recipients
+	return f.sendDraftErr
+}
+
+func (f *fakeUpstream) GetDraft(_ context.Context, _ jmap.Credentials, accountID, emailID string, _ int64) (jmap.Email, error) {
+	f.gotAccount = accountID
+	f.getDraftID = emailID
+	return f.getDraft, f.getDraftErr
+}
+
+func (f *fakeUpstream) GetReplySource(_ context.Context, _ jmap.Credentials, accountID, emailID string) (jmap.Email, error) {
+	f.gotAccount = accountID
+	f.replySourceID = emailID
+	return f.replySource, f.replySourceErr
 }
 
 func (f *fakeUpstream) DestroyEmails(_ context.Context, _ jmap.Credentials, accountID string, ids ...string) error {
@@ -724,6 +777,333 @@ func TestServiceSendChoosesTheMatchingIdentity(t *testing.T) {
 	}
 	if f.sent.IdentityID != "id1" {
 		t.Fatalf("identity = %q, want the caller's", f.sent.IdentityID)
+	}
+}
+
+func TestServiceCreateDraftUsesIdentityAndMailbox(t *testing.T) {
+	f := sendFixture()
+	f.draftID = "d1"
+	got, err := newTestService(f).CreateDraft(context.Background(), testCreds, Draft{
+		To:      []Address{{Name: "Alice", Email: "alice@example.test"}},
+		Cc:      []Address{{Email: "carol@example.test"}},
+		Subject: "Lunch",
+		Text:    "Noon?",
+	})
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	account, vendor, err := ids.ParseMessage(got)
+	if err != nil || account != testAccount || vendor != "d1" {
+		t.Fatalf("identifier = %q (account %q vendor %q error %v)", got, account, vendor, err)
+	}
+	if f.draft.DraftsMailboxID != "d" {
+		t.Fatalf("drafts mailbox = %q", f.draft.DraftsMailboxID)
+	}
+	if f.draft.From.Email != testCreds.User || f.draft.From.Name != "Bob" {
+		t.Fatalf("sender = %+v", f.draft.From)
+	}
+	if len(f.draft.To) != 1 || f.draft.To[0].Email != "alice@example.test" {
+		t.Fatalf("to = %+v", f.draft.To)
+	}
+	if len(f.draft.Cc) != 1 || f.draft.Cc[0].Email != "carol@example.test" {
+		t.Fatalf("cc = %+v", f.draft.Cc)
+	}
+	if f.draft.Subject != "Lunch" || f.draft.Text != "Noon?" {
+		t.Fatalf("content = %+v", f.draft)
+	}
+	if len(f.draft.InReplyTo) != 0 || len(f.draft.References) != 0 {
+		t.Fatalf("a plain draft carries threading: %+v", f.draft)
+	}
+}
+
+func TestServiceCreateDraftAllowsAnEmptyDraft(t *testing.T) {
+	f := sendFixture()
+	f.draftID = "d1"
+	if _, err := newTestService(f).CreateDraft(context.Background(), testCreds, Draft{}); err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	if f.draftCalls != 1 {
+		t.Fatal("an empty draft was not saved")
+	}
+	if len(f.draft.To) != 0 || len(f.draft.Cc) != 0 || f.draft.Subject != "" || f.draft.Text != "" {
+		t.Fatalf("empty draft = %+v", f.draft)
+	}
+}
+
+func TestServiceCreateDraftRefusesRecipientOutsideTheDomain(t *testing.T) {
+	f := sendFixture()
+	_, err := newTestService(f).CreateDraft(context.Background(), testCreds, Draft{
+		To: []Address{{Email: "someone@elsewhere.test"}},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.draftCalls != 0 {
+		t.Fatal("saved a draft with a foreign recipient")
+	}
+}
+
+func TestServiceCreateDraftRefusesCcOutsideTheDomain(t *testing.T) {
+	f := sendFixture()
+	_, err := newTestService(f).CreateDraft(context.Background(), testCreds, Draft{
+		Cc: []Address{{Email: "someone@elsewhere.test"}},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.draftCalls != 0 {
+		t.Fatal("saved a draft with a foreign recipient")
+	}
+}
+
+func TestServiceSendDraftSubmitsTheExistingMessage(t *testing.T) {
+	f := sendFixture()
+	f.getDraft = jmap.Email{
+		ID:         "d1",
+		Keywords:   map[string]bool{"$draft": true},
+		MailboxIDs: map[string]bool{"d": true},
+		To:         []jmap.Address{{Email: "alice@example.test"}},
+		Cc:         []jmap.Address{{Email: "carol@example.test"}},
+		Bcc:        []jmap.Address{{Email: "dave@example.test"}},
+	}
+	got, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message(testAccount, "d1"))
+	if err != nil {
+		t.Fatalf("SendDraft: %v", err)
+	}
+	account, vendor, err := ids.ParseMessage(got)
+	if err != nil || account != testAccount || vendor != "d1" {
+		t.Fatalf("identifier = %q (account %q vendor %q error %v), want it unchanged", got, account, vendor, err)
+	}
+	if f.getDraftID != "d1" || f.sendDraftID != "d1" {
+		t.Fatalf("read %q, submitted %q", f.getDraftID, f.sendDraftID)
+	}
+	if f.sendDraftDrafts != "d" || f.sendDraftSent != "e" || f.sendDraftIdentity != "id1" {
+		t.Fatalf("submission = %+v", f)
+	}
+	if f.sendDraftFrom.Email != testCreds.User {
+		t.Fatalf("envelope sender = %+v", f.sendDraftFrom)
+	}
+	emails := make([]string, 0, len(f.sendDraftRecipients))
+	for _, recipient := range f.sendDraftRecipients {
+		emails = append(emails, recipient.Email)
+	}
+	want := []string{"alice@example.test", "carol@example.test", "dave@example.test"}
+	if strings.Join(emails, ",") != strings.Join(want, ",") {
+		t.Fatalf("envelope recipients = %v, want %v", emails, want)
+	}
+	if len(f.destroyed) != 0 {
+		t.Fatalf("a submitted draft was destroyed: %v", f.destroyed)
+	}
+}
+
+func TestServiceSendDraftRefusesAMessageThatIsNotADraft(t *testing.T) {
+	f := sendFixture()
+	f.getDraft = jmap.Email{ID: "d1", MailboxIDs: map[string]bool{"e": true}}
+	_, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message(testAccount, "d1"))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.sendDraftCalls != 0 {
+		t.Fatal("submitted a message that is not a draft")
+	}
+}
+
+func TestServiceSendDraftRefusesADraftWithoutRecipients(t *testing.T) {
+	f := sendFixture()
+	f.getDraft = jmap.Email{
+		ID:         "d1",
+		Keywords:   map[string]bool{"$draft": true},
+		MailboxIDs: map[string]bool{"d": true},
+	}
+	_, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message(testAccount, "d1"))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.sendDraftCalls != 0 {
+		t.Fatal("submitted a draft with no recipient")
+	}
+}
+
+func TestServiceSendDraftRefusesRecipientOutsideTheDomain(t *testing.T) {
+	f := sendFixture()
+	f.getDraft = jmap.Email{
+		ID:         "d1",
+		Keywords:   map[string]bool{"$draft": true},
+		MailboxIDs: map[string]bool{"d": true},
+		To:         []jmap.Address{{Email: "someone@elsewhere.test"}},
+	}
+	_, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message(testAccount, "d1"))
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.sendDraftCalls != 0 {
+		t.Fatal("submitted a draft to a foreign domain")
+	}
+}
+
+func TestServiceSendDraftKeepsTheDraftWhenSubmissionIsDeclined(t *testing.T) {
+	f := sendFixture()
+	f.getDraft = jmap.Email{
+		ID:         "d1",
+		Keywords:   map[string]bool{"$draft": true},
+		MailboxIDs: map[string]bool{"d": true},
+		To:         []jmap.Address{{Email: "alice@example.test"}},
+	}
+	f.sendDraftErr = fmt.Errorf("%w: submission refused", jmap.ErrRejected)
+	_, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message(testAccount, "d1"))
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("error = %v, want ErrRejected", err)
+	}
+	if len(f.destroyed) != 0 {
+		t.Fatalf("a declined draft was destroyed: %v", f.destroyed)
+	}
+}
+
+func TestServiceSendDraftRefusesAForeignDraft(t *testing.T) {
+	f := sendFixture()
+	_, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message("another-account", "d1"))
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.getDraftID != "" || f.sendDraftCalls != 0 {
+		t.Fatal("a foreign identifier reached the mail server")
+	}
+}
+
+func TestServiceSendDraftRefusesAMalformedIdentifier(t *testing.T) {
+	f := sendFixture()
+	if _, err := newTestService(f).SendDraft(context.Background(), testCreds, "not-an-id"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.sessionCalls != 0 {
+		t.Fatal("touched the mail server for a malformed identifier")
+	}
+}
+
+func TestServiceSendDraftReportsAnUnknownDraft(t *testing.T) {
+	f := sendFixture()
+	f.getDraftErr = jmap.ErrNotFound
+	if _, err := newTestService(f).SendDraft(context.Background(), testCreds, ids.Message(testAccount, "gone")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceReplyCarriesThreadingAndPrefix(t *testing.T) {
+	f := sendFixture()
+	f.draftID = "r1"
+	f.replySource = jmap.Email{
+		ID:         "e1",
+		Subject:    "Lunch",
+		From:       []jmap.Address{{Name: "Alice", Email: "alice@example.test"}},
+		MessageID:  []string{"orig@example.test"},
+		References: []string{"first@example.test"},
+	}
+	got, err := newTestService(f).Reply(context.Background(), testCreds, ids.Message(testAccount, "e1"), "Sounds good.")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	account, vendor, err := ids.ParseMessage(got)
+	if err != nil || account != testAccount || vendor != "r1" {
+		t.Fatalf("identifier = %q (account %q vendor %q error %v)", got, account, vendor, err)
+	}
+	if f.replySourceID != "e1" {
+		t.Fatalf("read message %q", f.replySourceID)
+	}
+	if f.draft.DraftsMailboxID != "d" || f.draft.From.Email != testCreds.User {
+		t.Fatalf("draft = %+v", f.draft)
+	}
+	if len(f.draft.To) != 1 || f.draft.To[0].Email != "alice@example.test" {
+		t.Fatalf("recipient = %+v, want the original sender", f.draft.To)
+	}
+	if f.draft.Subject != "Re: Lunch" {
+		t.Fatalf("subject = %q", f.draft.Subject)
+	}
+	if f.draft.Text != "Sounds good." {
+		t.Fatalf("body = %q", f.draft.Text)
+	}
+	if len(f.draft.InReplyTo) != 1 || f.draft.InReplyTo[0] != "orig@example.test" {
+		t.Fatalf("inReplyTo = %v", f.draft.InReplyTo)
+	}
+	if len(f.draft.References) != 2 ||
+		f.draft.References[0] != "first@example.test" ||
+		f.draft.References[1] != "orig@example.test" {
+		t.Fatalf("references = %v", f.draft.References)
+	}
+}
+
+func TestServiceReplyKeepsAnExistingPrefix(t *testing.T) {
+	for _, subject := range []string{"Re: Lunch", "RE: Lunch"} {
+		f := sendFixture()
+		f.draftID = "r1"
+		f.replySource = jmap.Email{
+			Subject:   subject,
+			From:      []jmap.Address{{Email: "alice@example.test"}},
+			MessageID: []string{"orig@example.test"},
+		}
+		if _, err := newTestService(f).Reply(context.Background(), testCreds, ids.Message(testAccount, "e1"), "hi"); err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		if f.draft.Subject != subject {
+			t.Fatalf("subject = %q, want %q unchanged", f.draft.Subject, subject)
+		}
+	}
+}
+
+func TestServiceReplyRefusesAForeignMessage(t *testing.T) {
+	f := sendFixture()
+	_, err := newTestService(f).Reply(context.Background(), testCreds, ids.Message("another-account", "e1"), "hi")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.replySourceID != "" || f.draftCalls != 0 {
+		t.Fatal("a foreign identifier reached the mail server")
+	}
+}
+
+func TestServiceReplyReportsAnUnknownMessage(t *testing.T) {
+	f := sendFixture()
+	f.replySourceErr = jmap.ErrNotFound
+	if _, err := newTestService(f).Reply(context.Background(), testCreds, ids.Message(testAccount, "gone"), "hi"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceReplyRefusesAMessageWithoutASender(t *testing.T) {
+	f := sendFixture()
+	f.replySource = jmap.Email{ID: "e1", Subject: "Lunch"}
+	_, err := newTestService(f).Reply(context.Background(), testCreds, ids.Message(testAccount, "e1"), "hi")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.draftCalls != 0 {
+		t.Fatal("created a reply to a message with no sender")
+	}
+}
+
+func TestServiceReplyRefusesASenderOutsideTheDomain(t *testing.T) {
+	f := sendFixture()
+	f.replySource = jmap.Email{
+		ID:        "e1",
+		Subject:   "Lunch",
+		From:      []jmap.Address{{Email: "someone@elsewhere.test"}},
+		MessageID: []string{"orig@example.test"},
+	}
+	_, err := newTestService(f).Reply(context.Background(), testCreds, ids.Message(testAccount, "e1"), "hi")
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if f.draftCalls != 0 {
+		t.Fatal("created a reply to a foreign sender")
+	}
+}
+
+func TestReplyReferencesDeduplicates(t *testing.T) {
+	got := replyReferences(
+		[]string{"first@example.test", "orig@example.test", " "},
+		[]string{"orig@example.test"},
+	)
+	if strings.Join(got, ",") != "first@example.test,orig@example.test" {
+		t.Fatalf("references = %v", got)
 	}
 }
 

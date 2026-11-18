@@ -122,6 +122,16 @@ type OutgoingMessage struct {
 	Text    string
 }
 
+// Draft is a caller-supplied draft. Every field is optional, so a client can
+// save an unfinished message. There is no sender field: the sender is the
+// authenticated account's identity, exactly as for a send.
+type Draft struct {
+	To      []Address
+	Cc      []Address
+	Subject string
+	Text    string
+}
+
 // MessagePatch is a desired-state message update. A nil field is left
 // unchanged, so repeating a patch changes nothing. A non-empty MailboxID moves
 // the message to exactly that mailbox; it is not a copy.
@@ -135,6 +145,13 @@ type MessagePatch struct {
 type Writer interface {
 	// Send returns the Mailflow identifier of the sent message.
 	Send(ctx context.Context, creds Credentials, msg OutgoingMessage) (string, error)
+	// CreateDraft saves a draft and returns its Mailflow identifier.
+	CreateDraft(ctx context.Context, creds Credentials, draft Draft) (string, error)
+	// SendDraft submits an existing draft and returns its Mailflow identifier.
+	SendDraft(ctx context.Context, creds Credentials, draftID string) (string, error)
+	// Reply creates a draft reply to a message and returns its Mailflow
+	// identifier.
+	Reply(ctx context.Context, creds Credentials, messageID, text string) (string, error)
 	// CreateMailbox returns the Mailflow identifier of the new mailbox.
 	CreateMailbox(ctx context.Context, creds Credentials, name string) (string, error)
 	// RenameMailbox changes a custom mailbox's name.
@@ -157,6 +174,10 @@ type upstream interface {
 	GetEmails(ctx context.Context, creds jmap.Credentials, accountID string, opts jmap.GetEmailsOptions) ([]jmap.Email, error)
 	Identities(ctx context.Context, creds jmap.Credentials, accountID string) ([]jmap.Identity, error)
 	SendMessage(ctx context.Context, creds jmap.Credentials, accountID string, msg jmap.OutgoingEmail) (string, error)
+	CreateDraft(ctx context.Context, creds jmap.Credentials, accountID string, draft jmap.DraftContent) (string, error)
+	SendDraft(ctx context.Context, creds jmap.Credentials, accountID, draftsMailboxID, sentMailboxID, identityID, emailID string, from jmap.Address, recipients []jmap.Address) error
+	GetDraft(ctx context.Context, creds jmap.Credentials, accountID, emailID string, maxBodyBytes int64) (jmap.Email, error)
+	GetReplySource(ctx context.Context, creds jmap.Credentials, accountID, emailID string) (jmap.Email, error)
 	DestroyEmails(ctx context.Context, creds jmap.Credentials, accountID string, ids ...string) error
 	UpdateEmail(ctx context.Context, creds jmap.Credentials, accountID, emailID string, patch jmap.EmailPatch) error
 	CreateMailbox(ctx context.Context, creds jmap.Credentials, accountID, name string) (string, error)
@@ -345,44 +366,9 @@ func (s *Service) Message(ctx context.Context, creds Credentials, messageID stri
 // account's identity, never from the request. Recipients are restricted to the
 // identity's domain, which is what keeps the service from becoming a relay.
 func (s *Service) Send(ctx context.Context, creds Credentials, msg OutgoingMessage) (string, error) {
-	account, err := s.account(ctx, creds)
+	account, identity, drafts, sent, domain, err := s.sender(ctx, creds)
 	if err != nil {
 		return "", err
-	}
-
-	identities, err := s.upstream.Identities(ctx, toJMAP(creds), account)
-	if err != nil {
-		return "", mapError(err)
-	}
-	identity, ok := chooseIdentity(identities, creds.User)
-	if !ok {
-		// A permanent condition for this account, not an outage.
-		return "", fmt.Errorf("%w: the account has no sending identity", ErrRejected)
-	}
-
-	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
-	if err != nil {
-		return "", mapError(err)
-	}
-	var drafts, sent string
-	for _, box := range boxes {
-		switch box.Role {
-		case "drafts":
-			drafts = box.ID
-		case "sent":
-			sent = box.ID
-		}
-	}
-	if drafts == "" || sent == "" {
-		return "", fmt.Errorf("%w: the account has no drafts or sent mailbox", ErrUnavailable)
-	}
-
-	domain := addressDomain(identity.Email)
-	if domain == "" {
-		domain = addressDomain(creds.User)
-	}
-	if domain == "" {
-		return "", fmt.Errorf("%w: the account has no usable mail domain", ErrRejected)
 	}
 	for _, recipient := range append(append([]Address{}, msg.To...), msg.Cc...) {
 		if !strings.EqualFold(addressDomain(recipient.Email), domain) {
@@ -390,12 +376,7 @@ func (s *Service) Send(ctx context.Context, creds Credentials, msg OutgoingMessa
 		}
 	}
 
-	// The pinned release names the identity after its address. A display name
-	// equal to the address is noise, so it is omitted rather than duplicated.
-	from := jmap.Address{Email: identity.Email}
-	if identity.Name != "" && !strings.EqualFold(identity.Name, identity.Email) {
-		from.Name = identity.Name
-	}
+	from := senderAddress(identity)
 
 	vendorID, err := s.upstream.SendMessage(ctx, toJMAP(creds), account, jmap.OutgoingEmail{
 		DraftsMailboxID: drafts,
@@ -419,6 +400,212 @@ func (s *Service) Send(ctx context.Context, creds Credentials, msg OutgoingMessa
 		return "", mapError(err)
 	}
 	return ids.Message(account, vendorID), nil
+}
+
+// sender resolves everything an outgoing message needs: the account, the
+// sending identity, the drafts and sent mailboxes, and the local domain.
+// Sending, draft creation, and replies all share it so the sender and the
+// domain rule cannot drift between them.
+func (s *Service) sender(ctx context.Context, creds Credentials) (account string, identity jmap.Identity, drafts, sent, domain string, err error) {
+	account, err = s.account(ctx, creds)
+	if err != nil {
+		return "", jmap.Identity{}, "", "", "", err
+	}
+
+	identities, err := s.upstream.Identities(ctx, toJMAP(creds), account)
+	if err != nil {
+		return "", jmap.Identity{}, "", "", "", mapError(err)
+	}
+	identity, ok := chooseIdentity(identities, creds.User)
+	if !ok {
+		// A permanent condition for this account, not an outage.
+		return "", jmap.Identity{}, "", "", "", fmt.Errorf("%w: the account has no sending identity", ErrRejected)
+	}
+
+	boxes, err := s.upstream.Mailboxes(ctx, toJMAP(creds), account)
+	if err != nil {
+		return "", jmap.Identity{}, "", "", "", mapError(err)
+	}
+	for _, box := range boxes {
+		switch box.Role {
+		case "drafts":
+			drafts = box.ID
+		case "sent":
+			sent = box.ID
+		}
+	}
+	if drafts == "" || sent == "" {
+		return "", jmap.Identity{}, "", "", "", fmt.Errorf("%w: the account has no drafts or sent mailbox", ErrUnavailable)
+	}
+
+	domain = addressDomain(identity.Email)
+	if domain == "" {
+		domain = addressDomain(creds.User)
+	}
+	if domain == "" {
+		return "", jmap.Identity{}, "", "", "", fmt.Errorf("%w: the account has no usable mail domain", ErrRejected)
+	}
+	return account, identity, drafts, sent, domain, nil
+}
+
+// senderAddress is the identity as a message sender. The pinned release names
+// the identity after its address; a display name equal to the address is noise,
+// so it is omitted rather than duplicated.
+func senderAddress(identity jmap.Identity) jmap.Address {
+	from := jmap.Address{Email: identity.Email}
+	if identity.Name != "" && !strings.EqualFold(identity.Name, identity.Email) {
+		from.Name = identity.Name
+	}
+	return from
+}
+
+// CreateDraft saves a plain-text draft as the caller. Every field is optional;
+// the server accepts an empty draft, which is what lets a client start one
+// before it is complete. Recipients stay inside the caller's domain for the
+// same reason a send does: the service must not become a relay, and a draft
+// authored here should be sendable unchanged.
+func (s *Service) CreateDraft(ctx context.Context, creds Credentials, draft Draft) (string, error) {
+	account, identity, drafts, _, domain, err := s.sender(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+	for _, recipient := range append(append([]Address{}, draft.To...), draft.Cc...) {
+		if !strings.EqualFold(addressDomain(recipient.Email), domain) {
+			return "", fmt.Errorf("%w: a recipient is outside the local mail domain", ErrInvalidInput)
+		}
+	}
+
+	vendorID, err := s.upstream.CreateDraft(ctx, toJMAP(creds), account, jmap.DraftContent{
+		DraftsMailboxID: drafts,
+		From:            senderAddress(identity),
+		To:              toJMAPAddresses(draft.To),
+		Cc:              toJMAPAddresses(draft.Cc),
+		Subject:         draft.Subject,
+		Text:            draft.Text,
+	})
+	if err != nil {
+		return "", mapError(err)
+	}
+	return ids.Message(account, vendorID), nil
+}
+
+// SendDraft submits an existing draft. The draft's own recipients, including a
+// Bcc another client set, are read and checked before the mail server is asked
+// to submit, so the local-domain rule also covers a draft the service did not
+// create. The message keeps its identifier: it leaves drafts for sent rather
+// than being re-created.
+func (s *Service) SendDraft(ctx context.Context, creds Credentials, draftID string) (string, error) {
+	draftAccount, vendorDraft, err := ids.ParseMessage(draftID)
+	if err != nil {
+		return "", ErrNotFound
+	}
+
+	account, identity, drafts, sent, domain, err := s.sender(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+	if draftAccount != account {
+		return "", ErrNotFound
+	}
+
+	draft, err := s.upstream.GetDraft(ctx, toJMAP(creds), account, vendorDraft, s.bodyMaxBytes)
+	if err != nil {
+		return "", mapError(err)
+	}
+	if !draft.Keywords["$draft"] || !draft.MailboxIDs[drafts] {
+		return "", fmt.Errorf("%w: the message is not a draft", ErrInvalidInput)
+	}
+
+	recipients := make([]jmap.Address, 0, len(draft.To)+len(draft.Cc)+len(draft.Bcc))
+	recipients = append(recipients, draft.To...)
+	recipients = append(recipients, draft.Cc...)
+	recipients = append(recipients, draft.Bcc...)
+	if len(recipients) == 0 {
+		return "", fmt.Errorf("%w: the draft has no recipient", ErrInvalidInput)
+	}
+	for _, recipient := range recipients {
+		if !strings.EqualFold(addressDomain(recipient.Email), domain) {
+			return "", fmt.Errorf("%w: a recipient is outside the local mail domain", ErrInvalidInput)
+		}
+	}
+
+	if err := s.upstream.SendDraft(ctx, toJMAP(creds), account, drafts, sent, identity.ID, vendorDraft, senderAddress(identity), recipients); err != nil {
+		return "", mapError(err)
+	}
+	return ids.Message(account, vendorDraft), nil
+}
+
+// Reply composes a draft answer to a message the caller can read. The
+// recipient is the original sender, the subject gains one prefix, and the
+// threading fields are carried so a standard client groups the reply with the
+// conversation. The body is exactly the caller's text: quoting is a product
+// decision that stays with the client.
+func (s *Service) Reply(ctx context.Context, creds Credentials, messageID, text string) (string, error) {
+	messageAccount, vendorMessage, err := ids.ParseMessage(messageID)
+	if err != nil {
+		return "", ErrNotFound
+	}
+
+	account, identity, drafts, _, domain, err := s.sender(ctx, creds)
+	if err != nil {
+		return "", err
+	}
+	if messageAccount != account {
+		return "", ErrNotFound
+	}
+
+	source, err := s.upstream.GetReplySource(ctx, toJMAP(creds), account, vendorMessage)
+	if err != nil {
+		return "", mapError(err)
+	}
+	if len(source.From) == 0 || source.From[0].Email == "" {
+		return "", fmt.Errorf("%w: the message has no sender to reply to", ErrInvalidInput)
+	}
+	recipient := source.From[0]
+	if !strings.EqualFold(addressDomain(recipient.Email), domain) {
+		return "", fmt.Errorf("%w: a recipient is outside the local mail domain", ErrInvalidInput)
+	}
+
+	vendorID, err := s.upstream.CreateDraft(ctx, toJMAP(creds), account, jmap.DraftContent{
+		DraftsMailboxID: drafts,
+		From:            senderAddress(identity),
+		To:              []jmap.Address{recipient},
+		Subject:         replySubject(source.Subject),
+		Text:            text,
+		InReplyTo:       source.MessageID,
+		References:      replyReferences(source.References, source.MessageID),
+	})
+	if err != nil {
+		return "", mapError(err)
+	}
+	return ids.Message(account, vendorID), nil
+}
+
+// replySubject prefixes a subject once. A subject that already carries the
+// prefix is left alone, whatever the case of "re", so a second reply in a
+// conversation does not accumulate prefixes.
+func replySubject(subject string) string {
+	if strings.HasPrefix(strings.ToLower(subject), "re: ") {
+		return subject
+	}
+	return "Re: " + subject
+}
+
+// replyReferences appends the original message's identifier to its references
+// and removes duplicates. An original with no references still produces one
+// reference, which is the minimum a client needs to group the thread.
+func replyReferences(references, messageID []string) []string {
+	out := make([]string, 0, len(references)+len(messageID))
+	seen := make(map[string]bool, len(references)+len(messageID))
+	for _, id := range append(append([]string{}, references...), messageID...) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // CreateMailbox creates a top-level custom mailbox. The name is validated and
