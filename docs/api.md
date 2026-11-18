@@ -55,6 +55,11 @@ passes its tests, the verification scripts parse, and the specs are coherent. Th
 live API and IMAP checks in `verify-api.py` still need a running stack; CI does
 not start mail containers.
 
+Operational metrics are available at `GET /metrics` on the same loopback
+listener, with route and status labels only; see
+[`docs/observability.md`](observability.md). This endpoint is not part of the
+versioned `/v1` contract.
+
 ## Configuration
 
 Everything comes from the environment and is validated at startup. A missing or

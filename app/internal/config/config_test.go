@@ -354,3 +354,32 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 		}
 	}
 }
+
+func TestOTLPEndpointIsOptionalAndValidated(t *testing.T) {
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, []byte("test CA placeholder"), 0o600); err != nil {
+		t.Fatalf("write CA: %v", err)
+	}
+	base := map[string]string{
+		"MAILFLOW_JMAP_URL":      "https://mail.example/jmap/",
+		"MAILFLOW_JMAP_HOSTNAME": "mail.example",
+		"MAILFLOW_CA_FILE":       caPath,
+		"MAILFLOW_DB_PASSWORD":   "local-test-only",
+	}
+	cfg, err := Load(func(name string) string { return base[name] })
+	if err != nil {
+		t.Fatalf("Load without collector: %v", err)
+	}
+	if cfg.OTLPEndpoint != "" {
+		t.Fatalf("endpoint = %q, want empty", cfg.OTLPEndpoint)
+	}
+	base[EnvOTLPEndpoint] = "http://collector.example:4318"
+	cfg, err = Load(func(name string) string { return base[name] })
+	if err != nil || cfg.OTLPEndpoint != base[EnvOTLPEndpoint] {
+		t.Fatalf("endpoint = %q error %v", cfg.OTLPEndpoint, err)
+	}
+	base[EnvOTLPEndpoint] = "ftp://collector.example"
+	if _, err := Load(func(name string) string { return base[name] }); err == nil {
+		t.Fatal("accepted a non-HTTP OTLP endpoint")
+	}
+}

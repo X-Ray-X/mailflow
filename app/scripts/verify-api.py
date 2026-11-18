@@ -252,8 +252,10 @@ def main():
             break
         report.check(f"bob: page {pages} advertises a cursor", bool(page.get("nextCursor")), "")
         cursor = page.get("nextCursor")
-        if pages > 10:
-            report.check("bob: paging terminated", False, "more than ten pages")
+        # The demo inbox accumulates probe mail over time, so the guard only
+        # protects against a cursor loop, not against a busy account.
+        if pages > 50:
+            report.check("bob: paging terminated", False, "more than fifty pages")
             break
 
     report.check("bob: paged to exhaustion", len(seen) == bob_inbox["total"],

@@ -64,6 +64,9 @@ type Options struct {
 	SendMaxRecipients int
 	// SendMaxBytes bounds the text body in bytes. Zero means no bound.
 	SendMaxBytes int64
+	// MetricsHandler serves Prometheus metrics without authentication. It is
+	// bound by the same loopback-only listener as the API.
+	MetricsHandler http.Handler
 }
 
 // Server is the HTTP surface.
@@ -100,6 +103,9 @@ func New(service Service, opts Options) *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.health)
+	if opts.MetricsHandler != nil {
+		mux.Handle("/metrics", opts.MetricsHandler)
+	}
 	mux.HandleFunc("/v1/mailboxes", s.protected(s.mailboxes))
 	mux.HandleFunc("/v1/mailboxes/{mailboxID}", s.protected(s.mailboxByID))
 	mux.HandleFunc("/v1/mailboxes/{mailboxID}/messages", s.protected(s.messages))

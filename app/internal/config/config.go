@@ -37,6 +37,7 @@ const (
 	EnvIdempotencyLease  = "MAILFLOW_IDEMPOTENCY_LEASE"
 	EnvSendMaxRecipients = "MAILFLOW_SEND_MAX_RECIPIENTS"
 	EnvSendMaxBytes      = "MAILFLOW_SEND_MAX_BYTES"
+	EnvOTLPEndpoint      = "MAILFLOW_OTEL_EXPORTER_OTLP_ENDPOINT"
 )
 
 // Defaults for the optional values.
@@ -93,6 +94,10 @@ type Config struct {
 
 	SendMaxRecipients int
 	SendMaxBytes      int64
+
+	// OTLPEndpoint is optional. When set, traces are exported over HTTP; an
+	// unavailable collector never fails a request.
+	OTLPEndpoint string
 }
 
 // Load reads configuration through getenv. It returns every problem it finds,
@@ -223,6 +228,14 @@ func Load(getenv func(string) string) (Config, error) {
 		DefaultSendMaxBytes, EnvSendMaxBytes, maxSendBytes)
 	if err != nil {
 		errs = append(errs, err)
+	}
+
+	cfg.OTLPEndpoint = strings.TrimSpace(getenv(EnvOTLPEndpoint))
+	if cfg.OTLPEndpoint != "" {
+		parsed, err := url.Parse(cfg.OTLPEndpoint)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			errs = append(errs, fmt.Errorf("%s: must be an http or https endpoint", EnvOTLPEndpoint))
+		}
 	}
 
 	if len(errs) > 0 {

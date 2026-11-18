@@ -80,8 +80,15 @@ jobs:
 
           c = json.load(sys.stdin)
           services = c["services"]
-          assert set(services) == {"api", "db", "web", "rabbitmq", "worker"}, sorted(services)
+          expected_services = {"api", "db", "web", "rabbitmq", "worker", "prometheus", "grafana"}
+          assert set(services) == expected_services, sorted(services)
           api, db, web = services["api"], services["db"], services["web"]
+          prometheus, grafana = services["prometheus"], services["grafana"]
+          for name, service in (("prometheus", prometheus), ("grafana", grafana)):
+              ports = service.get("ports") or []
+              assert ports and all(p.get("host_ip") == "127.0.0.1" for p in ports), (name, ports)
+              assert "data" in (service.get("networks") or {}), (name, service.get("networks"))
+              assert not [m for m in (service.get("volumes") or []) if "mail" in str(m)], name
           rabbit, worker = services["rabbitmq"], services["worker"]
 
           # The broker and worker are private: no host ports, no bind mounts,
