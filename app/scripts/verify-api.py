@@ -80,6 +80,22 @@ class Api:
             self.payloads.append((path, body))
             return err.code, err.headers, json.loads(body or b"{}")
 
+    def raw(self, path, creds=None):
+        """Fetch a binary response without trying to decode it as JSON."""
+        request = urllib.request.Request(self.base + path)
+        if creds is not None:
+            token = base64.b64encode(f"{creds[0]}:{creds[1]}".encode()).decode()
+            request.add_header("Authorization", "Basic " + token)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = response.read()
+                self.payloads.append((path, data))
+                return response.status, response.headers, data
+        except urllib.error.HTTPError as err:
+            data = err.read()
+            self.payloads.append((path, data))
+            return err.code, err.headers, data
+
 
 class Report:
     def __init__(self):
@@ -559,6 +575,48 @@ def main():
         for identifier in set(created_draft_ids):
             if identifier:
                 api.call(f"/v1/messages/{identifier}", bob_creds, method="DELETE")
+
+    # --- attachments --------------------------------------------------------
+    status, _, listing = api.call(f"/v1/mailboxes/{bob_inbox['id']}/messages?limit=100", bob_creds)
+    attachment_source = next(
+        (m for m in (listing.get("messages") or [])
+         if m.get("hasAttachment") and m.get("subject") == "Mailflow verification message"),
+        None)
+    if attachment_source is None:
+        print("SKIP attachments: the demo attachment message is not in bob's inbox")
+    else:
+        status, _, meta = api.call(f"/v1/messages/{attachment_source['id']}/attachments", bob_creds)
+        files = meta.get("attachments") or []
+        report.check("bob: attachment metadata is listed",
+                     status == 200 and len(files) == 1 and files[0].get("position") == 0
+                     and files[0].get("filename") == "payload.bin",
+                     f"status={status} files={files}")
+        status, headers, data = api.raw(f"/v1/messages/{attachment_source['id']}/attachments/0", bob_creds)
+        downloaded = status == 200 and (not files or len(data) == files[0]["size"])
+        report.check("bob: an attachment downloads", downloaded,
+                     f"status={status} bytes={len(data)}")
+        report.check("a download names the file and is not cached",
+                     "attachment" in (headers.get("Content-Disposition") or "").lower()
+                     and (headers.get("Cache-Control") or "") == "no-store"
+                     and (headers.get("X-Content-Type-Options") or "") == "nosniff"
+                     and (headers.get("Content-Type") or "").startswith("application/"),
+                     str(dict(headers)))
+        status, _, body = api.call(f"/v1/messages/{attachment_source['id']}/attachments/abc", bob_creds)
+        report.check("a malformed attachment position is refused",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{attachment_source['id']}/attachments/99", bob_creds)
+        report.check("an unknown attachment position is not found",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{attachment_source['id']}/attachments", alice_creds)
+        report.check("alice cannot list bob's attachments",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+        status, _, body = api.raw(f"/v1/messages/{attachment_source['id']}/attachments/0", alice_creds)
+        report.check("alice cannot download bob's attachment",
+                     status == 404 and json.loads(body).get("code") == "not_found",
+                     f"status={status} body={body[:120]!r}")
 
     # --- mailbox organization ----------------------------------------------
     # Every object created here is removed again, including on a failed check.

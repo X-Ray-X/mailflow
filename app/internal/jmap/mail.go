@@ -5,9 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
+
+// Attachment is the wire shape of one attachment on a JMAP email. The fields
+// the service does not publish stay here; only the adapter's own type crosses
+// into the public model.
+type Attachment struct {
+	BlobID      string `json:"blobId"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Size        int64  `json:"size"`
+	Disposition string `json:"disposition"`
+	PartID      string `json:"partId"`
+}
 
 // Mailbox is the wire shape of a JMAP mailbox, reduced to the properties the
 // service asks for.
@@ -54,6 +69,7 @@ type Email struct {
 	Keywords      map[string]bool      `json:"keywords"`
 	MailboxIDs    map[string]bool      `json:"mailboxIds"`
 	HasAttachment bool                 `json:"hasAttachment"`
+	Attachments   []Attachment         `json:"attachments"`
 	MessageID     []string             `json:"messageId"`
 	InReplyTo     []string             `json:"inReplyTo"`
 	References    []string             `json:"references"`
@@ -683,6 +699,97 @@ func messageIDList(ids []string) string {
 		out = append(out, "<"+id+">")
 	}
 	return strings.Join(out, " ")
+}
+
+// GetAttachments reads one email's attachment metadata. The property list is
+// explicit so the response carries no blob identifiers, bodies, or other vendor
+// detail beyond the attachment objects themselves.
+func (c *Client) GetAttachments(ctx context.Context, creds Credentials, accountID, emailID string) ([]Attachment, error) {
+	raw, err := c.Call(ctx, creds, "Email/get", map[string]any{
+		"accountId":  accountID,
+		"ids":        []string{emailID},
+		"properties": []string{"id", "attachments"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		List []Email `json:"list"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("%w: decode Email/get: %v", ErrUpstream, err)
+	}
+	if len(out.List) == 0 {
+		return nil, ErrNotFound
+	}
+	return out.List[0].Attachments, nil
+}
+
+// DownloadAttachment opens a binary stream for one attachment. The session's
+// download template is used rather than a constructed path, and it is followed
+// only when it names the configured mail host over HTTPS. The caller owns the
+// returned stream and must close it.
+func (c *Client) DownloadAttachment(ctx context.Context, creds Credentials, accountID string, att Attachment) (io.ReadCloser, error) {
+	session, err := c.FetchSession(ctx, creds)
+	if err != nil {
+		return nil, err
+	}
+	u, err := c.downloadURL(session.DownloadURL, accountID, att)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build download request: %w", err)
+	}
+	req.SetBasicAuth(creds.User, creds.Password)
+	accept := att.Type
+	if accept == "" || strings.ContainsAny(accept, "\r\n") {
+		accept = "application/octet-stream"
+	}
+	req.Header.Set("Accept", accept)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, classify(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			return nil, ErrNotFound
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return nil, ErrUnauthorized
+		default:
+			return nil, statusError(resp.StatusCode)
+		}
+	}
+	return resp.Body, nil
+}
+
+// downloadURL expands the observed template and refuses any destination that
+// is not HTTPS on the configured mail host. A session document naming another
+// host is a server failure, not an address to follow.
+func (c *Client) downloadURL(template, accountID string, att Attachment) (*url.URL, error) {
+	raw := strings.NewReplacer(
+		"{accountId}", url.PathEscape(accountID),
+		"{blobId}", url.PathEscape(att.BlobID),
+		"{name}", url.PathEscape(att.Name),
+		"{type}", url.QueryEscape(att.Type),
+	).Replace(template)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil ||
+		!strings.EqualFold(u.Hostname(), c.hostname) || c.apiURL == nil ||
+		c.apiURL.Scheme != "https" {
+		return nil, fmt.Errorf("%w: unsafe download URL", ErrUpstream)
+	}
+	// The session advertises the public mail hostname, which is the TLS
+	// server name but need not resolve inside the application network. Keep
+	// the template's path and parameters, but connect through the configured
+	// JMAP endpoint exactly as the API calls do.
+	u.Scheme = c.apiURL.Scheme
+	u.Host = c.apiURL.Host
+	return u, nil
 }
 
 // DestroyEmails removes messages by server identifier. It is used to

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sort"
 	"strings"
@@ -83,6 +84,29 @@ type MessageSummary struct {
 	HasAttachment bool
 }
 
+// maxAttachmentBytes bounds one download. It sits below the pinned mail
+// server's advertised attachment limit and is part of the public contract; the
+// service refuses a larger attachment instead of streaming an unbounded body.
+const maxAttachmentBytes = 32 << 20
+
+// Attachment is one file attached to a message, addressed by its position in
+// the message's attachment list. No mail server identifier is part of it.
+type Attachment struct {
+	Position    int
+	Filename    string
+	ContentType string
+	Size        int64
+}
+
+// AttachmentDownload is the metadata and byte stream of one attachment. The
+// caller owns the stream and must close it.
+type AttachmentDownload struct {
+	Filename    string
+	ContentType string
+	Size        int64
+	Body        io.ReadCloser
+}
+
 // Message is one message with its text body.
 type Message struct {
 	MessageSummary
@@ -111,6 +135,10 @@ type Reader interface {
 	Mailboxes(ctx context.Context, creds Credentials) ([]Mailbox, error)
 	Messages(ctx context.Context, creds Credentials, mailboxID string, page PageRequest) (Page, error)
 	Message(ctx context.Context, creds Credentials, messageID string) (Message, error)
+	// Attachments lists readable attachment metadata for one message.
+	Attachments(ctx context.Context, creds Credentials, messageID string) ([]Attachment, error)
+	// DownloadAttachment opens one bounded attachment stream.
+	DownloadAttachment(ctx context.Context, creds Credentials, messageID string, position int) (AttachmentDownload, error)
 }
 
 // OutgoingMessage is a validated message to send. It has no sender field: the
@@ -178,6 +206,8 @@ type upstream interface {
 	SendDraft(ctx context.Context, creds jmap.Credentials, accountID, draftsMailboxID, sentMailboxID, identityID, emailID string, from jmap.Address, recipients []jmap.Address) error
 	GetDraft(ctx context.Context, creds jmap.Credentials, accountID, emailID string, maxBodyBytes int64) (jmap.Email, error)
 	GetReplySource(ctx context.Context, creds jmap.Credentials, accountID, emailID string) (jmap.Email, error)
+	GetAttachments(ctx context.Context, creds jmap.Credentials, accountID, emailID string) ([]jmap.Attachment, error)
+	DownloadAttachment(ctx context.Context, creds jmap.Credentials, accountID string, att jmap.Attachment) (io.ReadCloser, error)
 	DestroyEmails(ctx context.Context, creds jmap.Credentials, accountID string, ids ...string) error
 	UpdateEmail(ctx context.Context, creds jmap.Credentials, accountID, emailID string, patch jmap.EmailPatch) error
 	CreateMailbox(ctx context.Context, creds jmap.Credentials, accountID, name string) (string, error)
@@ -360,6 +390,85 @@ func (s *Service) Message(ctx context.Context, creds Credentials, messageID stri
 		return Message{}, ErrNotFound
 	}
 	return MapMessage(account, list[0], s.bodyMaxBytes), nil
+}
+
+// Attachments lists the downloadable files on a message. The caller's account
+// is checked against the identifier before the mail server is asked for
+// anything, so a foreign identifier cannot be used to probe attachment state.
+func (s *Service) Attachments(ctx context.Context, creds Credentials, messageID string) ([]Attachment, error) {
+	_, _, attachments, err := s.attachmentSource(ctx, creds, messageID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Attachment, 0, len(attachments))
+	for i, att := range attachments {
+		out = append(out, Attachment{
+			Position:    i,
+			Filename:    att.Name,
+			ContentType: att.Type,
+			Size:        att.Size,
+		})
+	}
+	return out, nil
+}
+
+// DownloadAttachment opens one attachment stream. The metadata is re-read so
+// the position always names the current message, and the size is checked before
+// any bytes are fetched. Inline parts and parts without a filename are not
+// downloadable through this contract.
+func (s *Service) DownloadAttachment(ctx context.Context, creds Credentials, messageID string, position int) (AttachmentDownload, error) {
+	account, _, attachments, err := s.attachmentSource(ctx, creds, messageID)
+	if err != nil {
+		return AttachmentDownload{}, err
+	}
+	if position < 0 || position >= len(attachments) {
+		return AttachmentDownload{}, ErrNotFound
+	}
+	att := attachments[position]
+	if att.Size > maxAttachmentBytes {
+		return AttachmentDownload{}, fmt.Errorf("%w: the attachment exceeds the download bound", ErrUnavailable)
+	}
+
+	stream, err := s.upstream.DownloadAttachment(ctx, toJMAP(creds), account, att)
+	if err != nil {
+		return AttachmentDownload{}, mapError(err)
+	}
+	return AttachmentDownload{
+		Filename:    att.Name,
+		ContentType: att.Type,
+		Size:        att.Size,
+		Body:        stream,
+	}, nil
+}
+
+// attachmentSource resolves a message for one caller and returns only the
+// parts the contract exposes: named, non-inline attachments in server order.
+func (s *Service) attachmentSource(ctx context.Context, creds Credentials, messageID string) (string, string, []jmap.Attachment, error) {
+	messageAccount, vendorMessage, err := ids.ParseMessage(messageID)
+	if err != nil {
+		return "", "", nil, ErrNotFound
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if messageAccount != account {
+		return "", "", nil, ErrNotFound
+	}
+
+	list, err := s.upstream.GetAttachments(ctx, toJMAP(creds), account, vendorMessage)
+	if err != nil {
+		return "", "", nil, mapError(err)
+	}
+	attachments := make([]jmap.Attachment, 0, len(list))
+	for _, att := range list {
+		if att.Name == "" || att.Disposition == "inline" {
+			continue
+		}
+		attachments = append(attachments, att)
+	}
+	return account, vendorMessage, attachments, nil
 }
 
 // Send submits a plain-text message as the caller. The sender comes from the

@@ -429,6 +429,68 @@ draft in a standard client. `In-Reply-To` names the original message;
 also confirms the multi-reference rule that the earlier direct probe had not
 exercised. The full run reported `payloads scanned: 106` and `FAILURES: none`.
 
+### Attachments (probed 2026-11-18)
+
+Exercised with `bob@mailflow.test` on the pinned release. The demo inbox already
+holds messages with one `payload.bin` attachment (2048 bytes,
+`application/octet-stream`), and a two-attachment message was submitted over SMTP
+for the ordering check. The account id was `d`; identifiers below are this
+account's examples, not stable values.
+
+- **`Email/get` serves attachment metadata as the `attachments` property.**
+  Requesting `["id", "subject", "attachments"]` returned one object per
+  attachment with `blobId`, `charset`, `cid`, `disposition`, `language`,
+  `location`, `name`, `partId`, `size`, and `type`. Unused fields such as `cid`
+  and `language` were `null`. The service asks for this property explicitly: a
+  request with no `properties` includes `attachments` together with `blobId`,
+  `threadId`, `htmlBody`, and other vendor detail that must not reach HTTP.
+- **Order is stable.** A two-attachment message returned `first.txt` then
+  `second.txt` on two consecutive reads, and IMAP listed the parts in the same
+  order. Each download returned exactly the submitted bytes (16 and 17 bytes).
+- **The download template uses `{type}`, not `{accept}`.** The session's
+  `downloadUrl` is
+  `https://mail.mailflow.test/jmap/download/{accountId}/{blobId}/{name}?accept={type}`.
+  Expanding `{accountId}`, `{blobId}`, `{name}` (percent-encoded), and `{type}`
+  (percent-encoded) and sending Basic credentials returned `200` with
+  `content-type: application/octet-stream`,
+  `content-disposition: attachment; filename="payload.bin"`, and
+  `content-length: 2048`. The server also set a long-lived immutable
+  `cache-control`, which the service must override with `no-store`.
+- **An unknown blob is a plain `404`** with a vendor-shaped JSON problem body;
+  the service maps the status and does not pass that body through. An unknown
+  message id in `Email/get` produced an empty `list` and a `notFound` array of
+  the requested id.
+- **Unexercised:** an inline or `cid` attachment, a download interrupted
+  mid-stream, a blob larger than the service's public size bound, and the
+  advertised 50 MB per-email attachment limit. Only `disposition: attachment`
+  parts with a `name` were read.
+
+### Live HTTP/IMAP attachment cross-check (2026-11-18)
+
+The same attachment was fetched through both clients. HTTP side:
+
+```
+GET /v1/messages/msg1_ZA.ZWFhYWFhYg/attachments/0   (Basic auth)
+```
+
+IMAP side, with the same account:
+
+```
+SELECT INBOX
+SEARCH SUBJECT "Mailflow verification message"
+FETCH <seq> (BODY.PEEK[])
+```
+
+The `payload.bin` part was decoded from the IMAP response. Both paths returned
+2048 bytes with SHA-256
+`847361eb4968688623f08c9b6c97ab5cc5a12eef99543d38d3b96fad4dfabd02`, and the
+byte-for-byte comparison passed. The HTTP response carried
+`Content-Type: application/octet-stream`,
+`Content-Disposition: attachment; filename=payload.bin`, `Content-Length: 2048`,
+`Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`. The repeatable
+live contract check is `./app/scripts/verify-api.py --base http://127.0.0.1:8081`,
+which now covers attachment metadata, download, and cross-account refusal.
+
 ## Push notifications
 
 `eventSourceUrl` is a template with three parameters:

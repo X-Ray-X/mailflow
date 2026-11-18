@@ -2,13 +2,13 @@
 
 ## 1. Upstream surface
 
-- [ ] 1.1 Probe the pinned release with `bob@mailflow.test` and the existing
+- [x] 1.1 Probe the pinned release with `bob@mailflow.test` and the existing
   attachment message: read `Email/get` with the attachments property, confirm
   metadata fields and stable ordering across two reads, and fetch one blob
   through the session's `downloadUrl` using the caller's credentials. Record the
   commands, observed responses, failure cases, and anything still unexercised in
   `docs/integration-surface.md`; verify each statement against the probe transcript.
-- [ ] 1.2 Add attachment metadata and blob download to `app/internal/jmap/mail.go`
+- [x] 1.2 Add attachment metadata and blob download to `app/internal/jmap/mail.go`
   and the session type, including HTTPS/host validation of the expanded download
   URL and error mapping; verify with fake-server unit tests that the metadata
   request is explicit, the URL is built from the observed template, a foreign
@@ -16,12 +16,12 @@
 
 ## 2. Adapter and contract
 
-- [ ] 2.1 Add read-only attachment metadata and a bounded download to
+- [x] 2.1 Add read-only attachment metadata and a bounded download to
   `app/internal/mail`, with the caller's account checked against the message
   identifier before any upstream call; verify unit tests cover a readable
   attachment, a foreign message, an unknown message, an out-of-range position,
   and an upstream failure.
-- [ ] 2.2 Publish `GET /v1/messages/{id}/attachments` and
+- [x] 2.2 Publish `GET /v1/messages/{id}/attachments` and
   `GET /v1/messages/{id}/attachments/{index}` with Mailflow-only DTOs, a bounded
   streamed response, a sanitised download filename, `Content-Type`,
   `Cache-Control: no-store`, and `X-Content-Type-Options: nosniff`; verify API
@@ -31,15 +31,15 @@
 
 ## 3. Live verification and close-out
 
-- [ ] 3.1 Update `docs/api.md` and `README.md` with both endpoints, the
+- [x] 3.1 Update `docs/api.md` and `README.md` with both endpoints, the
   position-addressing rule, the size bound, and the fact that attachments are
   read-only; verify the documented examples against the running local stack with
   the demo credentials in `deploy/mail/.env` and the existing attachment message.
-- [ ] 3.2 Extend `app/scripts/verify-api.py` with attachment listing, a real
+- [x] 3.2 Extend `app/scripts/verify-api.py` with attachment listing, a real
   download, a foreign message, a malformed position, an unknown position, and a
   vendor-vocabulary scan of the new responses; verify the script exits
   successfully against `http://127.0.0.1:8081` and scans every new response.
-- [ ] 3.3 Cross-check one attachment over IMAP by fetching the same message's
+- [x] 3.3 Cross-check one attachment over IMAP by fetching the same message's
   structure and body part, and confirm the bytes match the HTTP download;
   record the command and result in `docs/integration-surface.md`.
 - [ ] 3.4 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;

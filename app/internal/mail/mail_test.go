@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,16 @@ type fakeUpstream struct {
 	replySource    jmap.Email
 	replySourceErr error
 	replySourceID  string
+
+	attachments    []jmap.Attachment
+	attachmentsErr error
+	attachmentID   string
+
+	downloadBody       io.ReadCloser
+	downloadErr        error
+	downloadAttachment jmap.Attachment
+	downloadAccount    string
+	downloadCalls      int
 
 	destroyed  []string
 	destroyErr error
@@ -172,6 +183,19 @@ func (f *fakeUpstream) GetReplySource(_ context.Context, _ jmap.Credentials, acc
 	f.gotAccount = accountID
 	f.replySourceID = emailID
 	return f.replySource, f.replySourceErr
+}
+
+func (f *fakeUpstream) GetAttachments(_ context.Context, _ jmap.Credentials, accountID, emailID string) ([]jmap.Attachment, error) {
+	f.gotAccount = accountID
+	f.attachmentID = emailID
+	return f.attachments, f.attachmentsErr
+}
+
+func (f *fakeUpstream) DownloadAttachment(_ context.Context, _ jmap.Credentials, accountID string, att jmap.Attachment) (io.ReadCloser, error) {
+	f.downloadAccount = accountID
+	f.downloadAttachment = att
+	f.downloadCalls++
+	return f.downloadBody, f.downloadErr
 }
 
 func (f *fakeUpstream) DestroyEmails(_ context.Context, _ jmap.Credentials, accountID string, ids ...string) error {
@@ -1488,5 +1512,129 @@ func TestServiceDeleteMailboxRejectsForeignAndUnknown(t *testing.T) {
 	}
 	if f.destroyedMailboxID != "" {
 		t.Fatal("destroyed a mailbox the caller does not own")
+	}
+}
+
+func attachmentFixture() *fakeUpstream {
+	return &fakeUpstream{
+		attachments: []jmap.Attachment{
+			{BlobID: "b1", Name: "first.txt", Type: "text/plain", Size: 16, Disposition: "attachment"},
+			{BlobID: "b2", Name: "second.bin", Type: "application/octet-stream", Size: 17, Disposition: "attachment"},
+			{BlobID: "b3", Name: "", Type: "text/plain", Size: 3, Disposition: "inline"},
+		},
+		downloadBody: io.NopCloser(strings.NewReader("SECOND-FILE-BYTES")),
+	}
+}
+
+func TestServiceAttachmentsListsNamedPartsOnly(t *testing.T) {
+	f := attachmentFixture()
+	got, err := newTestService(f).Attachments(context.Background(), testCreds, ids.Message(testAccount, "e1"))
+	if err != nil {
+		t.Fatalf("Attachments: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("attachments = %+v, want two named parts", got)
+	}
+	if got[0].Position != 0 || got[0].Filename != "first.txt" || got[0].ContentType != "text/plain" || got[0].Size != 16 {
+		t.Fatalf("first = %+v", got[0])
+	}
+	if got[1].Position != 1 || got[1].Filename != "second.bin" || got[1].ContentType != "application/octet-stream" || got[1].Size != 17 {
+		t.Fatalf("second = %+v", got[1])
+	}
+	if f.attachmentID != "e1" || f.gotAccount != testAccount {
+		t.Fatalf("read account %q message %q", f.gotAccount, f.attachmentID)
+	}
+}
+
+func TestServiceAttachmentsOnAPlainMessage(t *testing.T) {
+	f := &fakeUpstream{}
+	got, err := newTestService(f).Attachments(context.Background(), testCreds, ids.Message(testAccount, "e1"))
+	if err != nil {
+		t.Fatalf("Attachments: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("attachments = %+v, want empty", got)
+	}
+}
+
+func TestServiceAttachmentsRefusesAForeignMessage(t *testing.T) {
+	f := attachmentFixture()
+	if _, err := newTestService(f).Attachments(context.Background(), testCreds, ids.Message("another-account", "e1")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.attachmentID != "" {
+		t.Fatal("a foreign identifier reached the mail server")
+	}
+}
+
+func TestServiceAttachmentsReportsAnUnknownMessage(t *testing.T) {
+	f := attachmentFixture()
+	f.attachmentsErr = jmap.ErrNotFound
+	if _, err := newTestService(f).Attachments(context.Background(), testCreds, ids.Message(testAccount, "gone")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceDownloadAttachmentOpensTheSelectedPart(t *testing.T) {
+	f := attachmentFixture()
+	got, err := newTestService(f).DownloadAttachment(context.Background(), testCreds, ids.Message(testAccount, "e1"), 1)
+	if err != nil {
+		t.Fatalf("DownloadAttachment: %v", err)
+	}
+	defer func() { _ = got.Body.Close() }()
+	if got.Filename != "second.bin" || got.ContentType != "application/octet-stream" {
+		t.Fatalf("download = %+v", got)
+	}
+	if f.downloadAttachment.BlobID != "b2" || f.downloadAccount != testAccount || f.downloadCalls != 1 {
+		t.Fatalf("upstream download = %+v", f)
+	}
+	data, err := io.ReadAll(got.Body)
+	if err != nil || string(data) != "SECOND-FILE-BYTES" {
+		t.Fatalf("bytes = %q error %v", data, err)
+	}
+}
+
+func TestServiceDownloadAttachmentRefusesBadPositions(t *testing.T) {
+	for _, position := range []int{-1, 2, 99} {
+		f := attachmentFixture()
+		_, err := newTestService(f).DownloadAttachment(context.Background(), testCreds, ids.Message(testAccount, "e1"), position)
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("position %d: error = %v, want ErrNotFound", position, err)
+		}
+		if f.downloadCalls != 0 {
+			t.Fatalf("position %d fetched a blob", position)
+		}
+	}
+}
+
+func TestServiceDownloadAttachmentRefusesAForeignMessage(t *testing.T) {
+	f := attachmentFixture()
+	_, err := newTestService(f).DownloadAttachment(context.Background(), testCreds, ids.Message("another-account", "e1"), 0)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.attachmentID != "" || f.downloadCalls != 0 {
+		t.Fatal("a foreign identifier reached the mail server")
+	}
+}
+
+func TestServiceDownloadAttachmentRejectsAnOversizePart(t *testing.T) {
+	f := attachmentFixture()
+	f.attachments[0].Size = maxAttachmentBytes + 1
+	_, err := newTestService(f).DownloadAttachment(context.Background(), testCreds, ids.Message(testAccount, "e1"), 0)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+	if f.downloadCalls != 0 {
+		t.Fatal("fetched an oversize attachment")
+	}
+}
+
+func TestServiceDownloadAttachmentMapsUpstreamFailure(t *testing.T) {
+	f := attachmentFixture()
+	f.downloadErr = fmt.Errorf("%w: status 500", jmap.ErrUnavailable)
+	_, err := newTestService(f).DownloadAttachment(context.Background(), testCreds, ids.Message(testAccount, "e1"), 0)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
 	}
 }

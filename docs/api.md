@@ -5,10 +5,10 @@ server through JMAP and translates the result into Mailflow identifiers and
 vocabulary; nothing in a response is vendor-shaped.
 
 The contract covers reads and writes: sending a plain-text message, saving and
-submitting drafts, replying to a message, changing a message's read and starred
-flags, moving it between mailboxes, deleting it to trash, and creating,
-renaming, and deleting custom mailboxes. Attachments, search, and push are later
-changes.
+submitting drafts, replying to a message, reading and downloading attachments,
+changing a message's read and starred flags, moving it between mailboxes,
+deleting it to trash, and creating, renaming, and deleting custom mailboxes.
+Uploading attachments, search, and push are later changes.
 
 ## Runtime and build
 
@@ -133,9 +133,10 @@ instance, using the demo accounts from `deploy/mail/.env`:
 ```
 
 It checks paging, body content, cross-account refusal, malformed input, sending
-and replay, draft creation and submission, replies and threading, flag updates,
-mailbox creation, rename and deletion, message moves and soft deletion, and scans
-every response it receives — reads and writes — for vendor vocabulary.
+and replay, draft creation and submission, replies and threading, attachment
+metadata and download, flag updates, mailbox creation, rename and deletion,
+message moves and soft deletion, and scans every response it receives — reads
+and writes — for vendor vocabulary.
 
 ## Endpoints
 
@@ -276,6 +277,47 @@ One message with its text body.
 empty when the message has no such part. A body longer than
 `MAILFLOW_BODY_MAX_BYTES` is cut and `textTruncated` is `true`; the cut never
 splits a UTF-8 character.
+
+### `GET /v1/messages/{messageID}/attachments`
+
+Lists the files attached to a message the caller can read.
+
+```json
+{
+  "attachments": [
+    { "position": 0, "filename": "payload.bin", "contentType": "application/octet-stream", "size": 2048 }
+  ]
+}
+```
+
+`attachments` is always an array and is empty when the message has no files.
+`position` is a zero-based index into this list and is the only way to address
+an attachment: mail server blob identifiers and download addresses are never
+published. The order is stable for the life of the message. Inline parts and
+parts without a filename are not listed. An unknown or foreign message is
+`not_found`.
+
+Attachments are read-only in this version: there is no upload or edit endpoint,
+and sending still accepts a plain-text body only.
+
+### `GET /v1/messages/{messageID}/attachments/{position}`
+
+Downloads one attachment by its position from the list above.
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -o payload.bin \
+  http://127.0.0.1:8080/v1/messages/msg1_ZA.Ym1hYWFhYXA/attachments/0
+```
+
+Success is `200` with the raw bytes, the attachment's content type, a
+`Content-Disposition` naming its file, and `Cache-Control: no-store`. A declared
+`Content-Length` lets the client detect a download that ended early; treat an
+incomplete body as a failure and retry. A download is bounded at 32 MiB, below
+the mail server's own attachment limit; a larger attachment answers
+`service_unavailable`. A non-integer or negative position is `invalid_request`,
+and a position the message does not have is `not_found`. `HEAD` returns the
+headers without the bytes.
 
 ### `POST /v1/messages`
 

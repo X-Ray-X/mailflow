@@ -73,6 +73,9 @@ type Client struct {
 	apiURL     *url.URL
 	sessionURL *url.URL
 	http       *http.Client
+	// hostname is the name the mail certificate must cover. A download URL
+	// from the session is followed only when it names this host over HTTPS.
+	hostname string
 }
 
 // New builds a client that trusts only the configured CA and verifies the
@@ -113,6 +116,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		apiURL:     cfg.URL,
 		sessionURL: &sessionURL,
+		hostname:   cfg.Hostname,
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   cfg.Timeout,
@@ -123,6 +127,7 @@ func New(cfg Config) (*Client, error) {
 // Session is the part of the JMAP session document the service uses.
 type Session struct {
 	APIURL          string            `json:"apiUrl"`
+	DownloadURL     string            `json:"downloadUrl"`
 	PrimaryAccounts map[string]string `json:"primaryAccounts"`
 }
 

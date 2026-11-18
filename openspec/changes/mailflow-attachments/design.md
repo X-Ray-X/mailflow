@@ -55,6 +55,9 @@ client expands it for one blob and fetches the bytes with the caller's
 credentials and the configured TLS settings. Before fetching, it checks that
 the expanded URL is HTTPS and that its host matches the configured mail host; a
 session document naming another host is treated as a server failure. The
+connection then uses the configured JMAP endpoint's host with the path and
+parameters from the template, because the session's public hostname is the TLS
+server name and need not resolve inside the application's Compose network. The
 alternative was returning the vendor URL to the client. That would bypass the
 service as the only published API, expose a vendor address, and lose the
 account and size rules. A second alternative — proxying through a generic URL
