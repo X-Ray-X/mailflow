@@ -28,7 +28,7 @@
 - [x] 3.2 Update `docs/api.md`, `docs/web-client.md`, and `README.md` with the
   client's scope, credential handling, run command, and the manual verification
   pass; verify the documented commands against the running local stack.
-- [ ] 3.3 Review `git status` and the full diff for secrets, unbounded requests,
+- [x] 3.3 Review `git status` and the full diff for secrets, unbounded requests,
   unhandled promises, and data-loss paths, then commit on the
   `mailflow-web-client` branch with the verification result and state which
   interactive checks could not be automated.
