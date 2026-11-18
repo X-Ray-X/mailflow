@@ -29,7 +29,7 @@
 - [x] 3.2 Send a message through the live API and confirm the event reaches
   RabbitMQ and the event table, that a replay adds no row, and that stopping the
   broker leaves sends working; record commands and results.
-- [ ] 3.3 Run `./app/scripts/go.sh`, the web build/tests, and
+- [x] 3.3 Run `./app/scripts/go.sh`, the web build/tests, and
   `openspec validate --all --strict`; review the diff for secrets, unbounded
   loops, unhandled errors, and mailbox-state changes, then commit on the
   `mailflow-async-outbox` branch and verify the tree is clean.
