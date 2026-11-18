@@ -618,6 +618,45 @@ def main():
                      status == 404 and json.loads(body).get("code") == "not_found",
                      f"status={status} body={body[:120]!r}")
 
+    # --- search -------------------------------------------------------------
+    status, _, page = api.call("/v1/search?q=Mailflow&limit=2", bob_creds)
+    first = page.get("messages") or []
+    report.check("bob: a text search returns summaries",
+                 status == 200 and first and all(m["id"].startswith("msg1_") for m in first),
+                 f"status={status} count={len(first)}")
+    report.check("a search advertises another page", bool(page.get("nextCursor")) == bool(page.get("hasMore")),
+                 f"hasMore={page.get('hasMore')} cursor={bool(page.get('nextCursor'))}")
+    if page.get("hasMore") and page.get("nextCursor"):
+        status, _, second = api.call("/v1/search?q=Mailflow&limit=2&cursor=" + page["nextCursor"], bob_creds)
+        ids1 = {m["id"] for m in first}
+        ids2 = {m["id"] for m in (second.get("messages") or [])}
+        report.check("search paging does not repeat a message", status == 200 and not (ids1 & ids2),
+                     f"second={len(ids2)}")
+
+    status, _, body = api.call("/v1/search?q=verify-api", bob_creds)
+    report.check("a search matches body text", status == 200 and bool(body.get("messages")),
+                 f"status={status} count={len(body.get('messages') or [])}")
+    status, _, body = api.call("/v1/search?q=zzzz-no-such-text", bob_creds)
+    report.check("a search with no matches is empty",
+                 status == 200 and body.get("messages") == [] and body.get("hasMore") is False,
+                 f"status={status} body={body}")
+    status, _, body = api.call("/v1/search", bob_creds)
+    report.check("an empty query is refused",
+                 status == 400 and body.get("code") == "invalid_request",
+                 f"status={status} body={body}")
+    status, _, body = api.call("/v1/search?q=Mailflow&inMailbox=x", bob_creds)
+    report.check("an unknown search parameter is refused",
+                 status == 400 and body.get("code") == "invalid_request",
+                 f"status={status} body={body}")
+    status, _, body = api.call("/v1/search?q=Mailflow&mailboxId=" + alice_inbox["id"], bob_creds)
+    report.check("bob cannot search alice's mailbox",
+                 status == 404 and body.get("code") == "not_found",
+                 f"status={status} body={body}")
+    status, _, body = api.call("/v1/search?q=Mailflow&mailboxId=" + bob_inbox["id"], bob_creds)
+    report.check("a mailbox restriction works",
+                 status == 200 and isinstance(body.get("messages"), list),
+                 f"status={status}")
+
     # --- mailbox organization ----------------------------------------------
     # Every object created here is removed again, including on a failed check.
     org_name = f"Verify {stamp}"

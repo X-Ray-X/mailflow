@@ -1638,3 +1638,128 @@ func TestServiceDownloadAttachmentMapsUpstreamFailure(t *testing.T) {
 		t.Fatalf("error = %v, want ErrUnavailable", err)
 	}
 }
+
+func searchFixture() *fakeUpstream {
+	return &fakeUpstream{
+		query: jmap.QueryResult{IDs: []string{"e1"}, Total: 1, Position: 0},
+		emails: []jmap.Email{{
+			ID: "e1", Subject: "Lunch", From: []jmap.Address{{Email: "alice@example.test"}},
+		}},
+		mailboxExists: true,
+	}
+}
+
+func TestServiceSearchReturnsSummariesWithATextFilter(t *testing.T) {
+	f := searchFixture()
+	page, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{
+		Text: "Lunch", Page: PageRequest{Limit: 10},
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(page.Messages) != 1 || page.Messages[0].ID != ids.Message(testAccount, "e1") {
+		t.Fatalf("page = %+v", page)
+	}
+	if page.HasMore || page.NextCursor != "" {
+		t.Fatalf("single page reports more: %+v", page)
+	}
+	if f.gotQuery.Text != "Lunch" || f.gotQuery.MailboxID != "" || f.gotQuery.Limit != 10 {
+		t.Fatalf("query = %+v", f.gotQuery)
+	}
+	if f.queryCalls != 1 {
+		t.Fatalf("query calls = %d", f.queryCalls)
+	}
+}
+
+func TestServiceSearchWithNoMatches(t *testing.T) {
+	f := searchFixture()
+	f.query = jmap.QueryResult{Total: 0}
+	page, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{Text: "nothing"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(page.Messages) != 0 || page.HasMore || page.NextCursor != "" {
+		t.Fatalf("page = %+v", page)
+	}
+}
+
+func TestServiceSearchRestrictsToOneMailbox(t *testing.T) {
+	f := searchFixture()
+	page, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{
+		Text: "Lunch", MailboxID: ids.Mailbox(testAccount, "m1"),
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(page.Messages) != 1 || f.gotQuery.MailboxID != "m1" || f.gotMailboxID != "m1" {
+		t.Fatalf("page = %+v query = %+v mailbox %q", page, f.gotQuery, f.gotMailboxID)
+	}
+}
+
+func TestServiceSearchRefusesAForeignMailbox(t *testing.T) {
+	f := searchFixture()
+	_, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{
+		Text: "Lunch", MailboxID: ids.Mailbox("another-account", "m1"),
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.queryCalls != 0 || f.mailboxQueries != 0 {
+		t.Fatal("a foreign mailbox reached the mail server")
+	}
+}
+
+func TestServiceSearchRefusesAnUnknownMailbox(t *testing.T) {
+	f := searchFixture()
+	f.mailboxExists = false
+	_, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{
+		Text: "Lunch", MailboxID: ids.Mailbox(testAccount, "gone"),
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v, want ErrNotFound", err)
+	}
+	if f.queryCalls != 0 {
+		t.Fatal("queried an unknown mailbox")
+	}
+}
+
+func TestServiceSearchRefusesAForeignOrMalformedCursor(t *testing.T) {
+	for _, cursor := range []string{"not-a-cursor", ids.Cursor("another-account", "e0")} {
+		f := searchFixture()
+		_, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{
+			Text: "Lunch", Page: PageRequest{Cursor: cursor},
+		})
+		if !errors.Is(err, ErrInvalidCursor) {
+			t.Fatalf("cursor %q: error = %v, want ErrInvalidCursor", cursor, err)
+		}
+		if f.queryCalls != 0 {
+			t.Fatalf("cursor %q reached the mail server", cursor)
+		}
+	}
+}
+
+func TestServiceSearchPagesWithTheSameCursor(t *testing.T) {
+	f := searchFixture()
+	f.query = jmap.QueryResult{IDs: []string{"e2"}, Total: 3, Position: 1}
+	f.emails = []jmap.Email{{ID: "e2", Subject: "Lunch again"}}
+	page, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{
+		Text: "Lunch", Page: PageRequest{Cursor: ids.Cursor(testAccount, "e1")},
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !page.HasMore || page.NextCursor != ids.Cursor(testAccount, "e2") {
+		t.Fatalf("page = %+v", page)
+	}
+	if f.gotQuery.Anchor != "e1" {
+		t.Fatalf("anchor = %q", f.gotQuery.Anchor)
+	}
+}
+
+func TestServiceSearchMapsAnUpstreamFailure(t *testing.T) {
+	f := searchFixture()
+	f.queryErr = fmt.Errorf("%w: status 500", jmap.ErrUnavailable)
+	if _, err := newTestService(f).Search(context.Background(), testCreds, SearchRequest{Text: "Lunch"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+}

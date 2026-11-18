@@ -491,6 +491,34 @@ byte-for-byte comparison passed. The HTTP response carried
 live contract check is `./app/scripts/verify-api.py --base http://127.0.0.1:8081`,
 which now covers attachment metadata, download, and cross-account refusal.
 
+### Search filters (probed 2026-11-18)
+
+Exercised with `bob@mailflow.test` on the pinned release. The account id was
+`d`; identifiers below are examples, not stable values.
+
+- **`Email/query` accepts a `text` filter condition.** `{"text": "Mailflow"}`
+  matched messages whose subject contains the phrase, and `{"text":
+  "verify-api"}` matched messages whose *body* contains it, so the condition
+  covers both. A phrase with no match returned an empty `ids` array.
+- **A text condition combines with `inMailbox` in one filter object.**
+  `{"text": "Mailflow", "inMailbox": "<inbox>"}` returned 21 matches against
+  66 across all mailboxes; the same text with the sent mailbox returned 5.
+  Both keys in one `FilterCondition` are ANDed.
+- **`calculateTotal: true` is required for a total.** Without it the response
+  omitted `total`; with it the filtered queries above returned totals (66, 21,
+  5, 0). The existing listing query already sets it.
+- **Anchored paging works with a text filter.** With `sort` by `receivedAt`
+  descending, `limit: 2`, an `anchor` on the last id of the first page and
+  `anchorOffset: 1` returned the next two messages and `position: 2`; no message
+  repeated. `anchor` without `anchorOffset` is inclusive and does repeat the
+  anchor.
+- **A `subject` condition also works** (`{"subject": "Mailflow"}` returned 36),
+  but the service publishes one text query rather than exposing per-field
+  filters.
+- **Unexercised:** non-ASCII text, very long queries, and any ranking or
+  relevance ordering. Results were ordered by the requested sort, not by match
+  quality.
+
 ## Push notifications
 
 `eventSourceUrl` is a template with three parameters:

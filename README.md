@@ -81,7 +81,7 @@ of the project is the service boundary — the mail server is replaceable, and
 application deployments never recreate, upgrade, or reset mail infrastructure.
 
 Current state: the mail infrastructure is deployed and verified. The Go service
-publishes the read contract (mailboxes, message list, message content,
+publishes the read contract (mailboxes, message list, search, message content,
 attachment metadata and downloads) and the writes: sending a plain-text message,
 saving and submitting drafts, composing replies, setting a message's read and
 starred flags, moving and soft-deleting messages, and creating, renaming, and
@@ -162,8 +162,8 @@ checkout would not survive. The contract, configuration, and examples are in
 ./app/scripts/verify-api.py --base http://127.0.0.1:8080
 ```
 
-exercises the contract against a running instance: paging, body content,
-cross-account refusal, malformed input, sending and replay, draft creation and
+exercises the contract against a running instance: paging, search, body
+content, cross-account refusal, malformed input, sending and replay, draft creation and
 submission, replies and threading, attachment metadata and download, flag
 updates, and a vendor-vocabulary scan over reads and writes.
 

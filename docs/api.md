@@ -6,9 +6,9 @@ vocabulary; nothing in a response is vendor-shaped.
 
 The contract covers reads and writes: sending a plain-text message, saving and
 submitting drafts, replying to a message, reading and downloading attachments,
-changing a message's read and starred flags, moving it between mailboxes,
-deleting it to trash, and creating, renaming, and deleting custom mailboxes.
-Uploading attachments, search, and push are later changes.
+searching mail by text, changing a message's read and starred flags, moving it
+between mailboxes, deleting it to trash, and creating, renaming, and deleting
+custom mailboxes. Uploading attachments and push are later changes.
 
 ## Runtime and build
 
@@ -132,11 +132,11 @@ instance, using the demo accounts from `deploy/mail/.env`:
 ./app/scripts/verify-api.py --base http://127.0.0.1:8080
 ```
 
-It checks paging, body content, cross-account refusal, malformed input, sending
-and replay, draft creation and submission, replies and threading, attachment
-metadata and download, flag updates, mailbox creation, rename and deletion,
-message moves and soft deletion, and scans every response it receives — reads
-and writes — for vendor vocabulary.
+It checks paging, body content, search, cross-account refusal, malformed input,
+sending and replay, draft creation and submission, replies and threading,
+attachment metadata and download, flag updates, mailbox creation, rename and
+deletion, message moves and soft deletion, and scans every response it receives
+— reads and writes — for vendor vocabulary.
 
 ## Endpoints
 
@@ -252,6 +252,30 @@ never repeats a message already returned, because the cursor anchors the next
 page after the last message the page ended on. If that message is removed before
 the next request, the cursor answers `invalid_cursor`; restart from the first
 page rather than skipping mail.
+
+### `GET /v1/search`
+
+Finds messages by text. The query matches subject and body text; the observed
+mail server does no relevance ranking, so results are newest first. Reading a
+result uses `GET /v1/messages/{messageID}`.
+
+| Query | Meaning |
+|---|---|
+| `q` | Required, non-empty search text |
+| `mailboxId` | Optional; restrict results to one of the caller's mailboxes |
+| `limit` | Page size, with the same clamp as a message listing |
+| `cursor` | `nextCursor` from the previous page |
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  'http://127.0.0.1:8080/v1/search?q=Mailflow&limit=25'
+```
+
+The response is a message listing page: `messages`, always-present `hasMore`,
+and `nextCursor` when another page exists. A query with no matches returns an
+empty `messages` array. An empty query, an unknown parameter, or a malformed
+limit is `invalid_request`. An unknown or foreign `mailboxId` is `not_found`,
+and a stale cursor is `invalid_cursor`; restart the search in that case.
 
 ### `GET /v1/messages/{messageID}`
 
