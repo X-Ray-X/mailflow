@@ -20,7 +20,7 @@
 - [x] 2.2 Update `README.md` and `docs/api.md` with the required checks and what
   each proves; verify the documented commands match the workflow steps and run
   against the local checkout.
-- [ ] 2.3 Run `./app/scripts/go.sh`, the web build/tests, and
+- [x] 2.3 Run `./app/scripts/go.sh`, the web build/tests, and
   `openspec validate --all --strict`; review the diff for secrets and accidental
   scope changes, then commit on the `mailflow-ci-quality-gates` branch with the
   verification result and verify the tree is clean.
