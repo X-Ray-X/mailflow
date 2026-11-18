@@ -80,8 +80,18 @@ jobs:
 
           c = json.load(sys.stdin)
           services = c["services"]
-          assert set(services) == {"api", "db", "web"}, sorted(services)
+          assert set(services) == {"api", "db", "web", "rabbitmq", "worker"}, sorted(services)
           api, db, web = services["api"], services["db"], services["web"]
+          rabbit, worker = services["rabbitmq"], services["worker"]
+
+          # The broker and worker are private: no host ports, no bind mounts,
+          # and no route to the mail project.
+          assert not (rabbit.get("ports") or []), rabbit.get("ports")
+          assert not (worker.get("ports") or []), worker.get("ports")
+          assert not [m for m in (rabbit.get("volumes") or []) if m.get("type") == "bind"], rabbit.get("volumes")
+          assert set(rabbit.get("networks") or {}) == {"data"}, rabbit.get("networks")
+          assert set(worker.get("networks") or {}) == {"data"}, worker.get("networks")
+          assert worker.get("entrypoint") == ["/usr/local/bin/mailflow-worker"], worker.get("entrypoint")
 
           api_ports = api.get("ports") or []
           assert api_ports and all(p.get("host_ip") == "127.0.0.1" for p in api_ports), api_ports

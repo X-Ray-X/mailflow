@@ -23,6 +23,8 @@ env:
   APP_CONTAINER: mailflow-api
   APP_DB_CONTAINER: mailflow-db
   APP_WEB_CONTAINER: mailflow-web
+  APP_QUEUE_CONTAINER: mailflow-rabbitmq
+  APP_WORKER_CONTAINER: mailflow-worker
   # Published loopback port. A host property, supplied by the "production"
   # environment like MAIL_DATA_DIR, because the checkout is cleaned on every run
   # and cannot carry it. Empty means the tracked default, 8080.
@@ -33,6 +35,8 @@ env:
   # The application database password, supplied by the "production" environment
   # and written into the generated .env. Never committed, never printed.
   MAILFLOW_DB_PASSWORD: ${{ secrets.MAILFLOW_DB_PASSWORD }}
+  # Generated broker credential for the private queue. Never printed.
+  RABBITMQ_PASSWORD: ${{ secrets.RABBITMQ_PASSWORD }}
 
 jobs:
   deploy:
@@ -117,6 +121,18 @@ jobs:
               exit 1
               ;;
           esac
+          broker_password="${RABBITMQ_PASSWORD:-}"
+          case "$broker_password" in
+            '')
+              echo "error: RABBITMQ_PASSWORD must be set in the production environment" >&2
+              exit 1
+              ;;
+            *[!A-Za-z0-9._~-]*)
+              echo "error: RABBITMQ_PASSWORD may contain only letters, digits, '.', '_', '~' and '-'" >&2
+              exit 1
+              ;;
+          esac
+
           grep -q '^MAILFLOW_DB_PASSWORD=' .env \
             || { echo "error: .env.example has no MAILFLOW_DB_PASSWORD line" >&2; exit 1; }
           escaped="$(printf '%s' "$db_password" | sed 's/[&|\\]/\\&/g')"
@@ -125,6 +141,8 @@ jobs:
           sed -i "s|^MAILFLOW_WEB_IMAGE=.*|MAILFLOW_WEB_IMAGE=${MAILFLOW_WEB_IMAGE}|" .env
           sed -i "s|^MAILFLOW_WEB_PORT=.*|MAILFLOW_WEB_PORT=${web_port}|" .env
           sed -i "s|^MAILFLOW_DB_PASSWORD=.*|MAILFLOW_DB_PASSWORD=${escaped}|" .env
+          sed -i "s|^RABBITMQ_PASSWORD=.*|RABBITMQ_PASSWORD=${broker_password}|" .env
+          sed -i "s|^MAILFLOW_RABBITMQ_URL=.*|MAILFLOW_RABBITMQ_URL=amqp://mailflow:${broker_password}@rabbitmq:5672/|" .env
           chmod 600 .env
 
       - name: check the published port is free
@@ -190,15 +208,19 @@ jobs:
             db_status="$(docker inspect "$APP_DB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             api_status="$(docker inspect "$APP_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             web_status="$(docker inspect "$APP_WEB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
-            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$web_status" = "healthy" ]; then
+            queue_status="$(docker inspect "$APP_QUEUE_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
+            worker_status="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.State.Running}}' 2>/dev/null || echo missing)"
+            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$web_status" = "healthy" ] && [ "$queue_status" = "healthy" ] && [ "$worker_status" = "true" ]; then
               exit 0
             fi
             sleep 2
           done
-          echo "error: application stack did not become healthy (db=$db_status api=$api_status web=$web_status)" >&2
+          echo "error: application stack did not become healthy (db=$db_status api=$api_status web=$web_status queue=$queue_status worker=$worker_status)" >&2
           docker logs --tail 50 "$APP_DB_CONTAINER" >&2 || true
           docker logs --tail 50 "$APP_CONTAINER" >&2 || true
           docker logs --tail 50 "$APP_WEB_CONTAINER" >&2 || true
+          docker logs --tail 50 "$APP_QUEUE_CONTAINER" >&2 || true
+          docker logs --tail 50 "$APP_WORKER_CONTAINER" >&2 || true
           exit 1
 
       - name: verify the mail infrastructure was not modified
@@ -219,7 +241,7 @@ jobs:
           Application deployed from ${{ github.sha }}
           Image: ${MAILFLOW_IMAGE} (built on the host, arm64)
           Web image: ${MAILFLOW_WEB_IMAGE} (built from the same commit)
-          Health: db healthy, api healthy, web healthy
+          Health: db, api, web and queue healthy; worker running
           API: 127.0.0.1:${MAILFLOW_API_PORT:-8080} (host loopback)
           Web client: 127.0.0.1:${MAILFLOW_WEB_PORT:-8082} (host loopback)
           Database: mailflow-app-db volume preserved (not published)

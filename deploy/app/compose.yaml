@@ -93,6 +93,65 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  rabbitmq:
+    # Durable queue for send events. No published port: only the app's workers
+    # reach it. Credentials come from the generated .env, never from this file.
+    image: ${RABBITMQ_IMAGE:?RABBITMQ_IMAGE must be set}
+    container_name: mailflow-rabbitmq
+    init: true
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?RABBITMQ_USER must be set}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD must be set}
+    volumes:
+      - rabbit:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    networks:
+      - data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    # Same image as the API, different binary. It never speaks a mail protocol.
+    image: ${MAILFLOW_API_IMAGE:?MAILFLOW_API_IMAGE must be set}
+    container_name: mailflow-worker
+    entrypoint: ["/usr/local/bin/mailflow-worker"]
+    init: true
+    restart: unless-stopped
+    environment:
+      MAILFLOW_DB_HOST: db
+      MAILFLOW_DB_PORT: "5432"
+      MAILFLOW_DB_NAME: ${MAILFLOW_DB_NAME:-mailflow}
+      MAILFLOW_DB_USER: ${MAILFLOW_DB_USER:-mailflow}
+      MAILFLOW_DB_PASSWORD: ${MAILFLOW_DB_PASSWORD:?MAILFLOW_DB_PASSWORD must be set}
+      MAILFLOW_RABBITMQ_URL: ${MAILFLOW_RABBITMQ_URL:?MAILFLOW_RABBITMQ_URL must be set}
+      MAILFLOW_QUEUE_NAME: ${MAILFLOW_QUEUE_NAME:-mailflow.send.events}
+      MAILFLOW_WORKER_POLL: ${MAILFLOW_WORKER_POLL:-1s}
+    # The shared image has an HTTP healthcheck for the API binary; the worker
+    # serves no HTTP, so the deploy checks that the process is running.
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   db:
     # Pinned by exact release; the digest is recorded in
     # docs/application-database.md. PostgreSQL owns Mailflow application state
@@ -143,6 +202,9 @@ volumes:
   # it on `up --remove-orphans`; only an explicit `down --volumes` would.
   db:
     name: mailflow-app-db
+  # Broker state only; it holds identifiers, never mailbox content.
+  rabbit:
+    name: mailflow-app-rabbit
 
 networks:
   mail:

@@ -16,12 +16,15 @@ WORKDIR /src
 COPY go.mod ./
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/mailflow-api ./cmd/mailflow-api
+    go build -trimpath -ldflags="-s -w" -o /out/mailflow-api ./cmd/mailflow-api && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/mailflow-worker ./cmd/mailflow-worker
 
 FROM alpine:${ALPINE_VERSION}
 # No toolchain in the runtime image. BusyBox supplies wget for the health check.
 RUN adduser -D -H -u 10001 mailflow
 COPY --from=build /out/mailflow-api /usr/local/bin/mailflow-api
+COPY --from=build /out/mailflow-worker /usr/local/bin/mailflow-worker
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

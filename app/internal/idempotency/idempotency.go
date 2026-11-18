@@ -33,6 +33,13 @@ type Claim struct {
 	MessageID string
 }
 
+// SendEvent is the application event produced by a completed send. It carries
+// identifiers only, never mailbox content.
+type SendEvent struct {
+	Account   string
+	MessageID string
+}
+
 // Recorder is the durable record of sends that have been claimed, completed,
 // or released.
 type Recorder interface {
@@ -43,7 +50,7 @@ type Recorder interface {
 
 	// Complete records the successful send. The identifier is what a replay
 	// returns; it must be a Mailflow identifier, not a vendor one.
-	Complete(ctx context.Context, account, key, messageID string, ttl time.Duration) error
+	Complete(ctx context.Context, account, key, messageID string, ttl time.Duration, event SendEvent) error
 
 	// Release removes a claim for a send that certainly did not happen, so the
 	// caller may retry with the same key. It must not remove a success.

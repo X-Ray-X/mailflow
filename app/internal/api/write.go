@@ -385,7 +385,10 @@ func (s *Server) complete(account, key, messageID string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	return s.records.Complete(ctx, account, key, messageID, s.idemTTL)
+	return s.records.Complete(ctx, account, key, messageID, s.idemTTL, idempotency.SendEvent{
+		Account:   account,
+		MessageID: messageID,
+	})
 }
 
 // drafts accepts a new draft. Draft creation is mailbox state with no external

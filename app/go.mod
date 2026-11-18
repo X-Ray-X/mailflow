@@ -2,7 +2,10 @@ module github.com/X-Ray-X/mailflow/app
 
 go 1.27.4
 
-require github.com/jackc/pgx/v5 v5.13.0
+require (
+	github.com/jackc/pgx/v5 v5.13.0
+	github.com/rabbitmq/amqp091-go v1.10.0
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

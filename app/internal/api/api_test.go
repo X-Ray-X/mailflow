@@ -302,7 +302,7 @@ func (f *fakeRecorder) Claim(_ context.Context, account, key string, hash []byte
 	return f.claim, f.claimErr
 }
 
-func (f *fakeRecorder) Complete(_ context.Context, _, _, messageID string, _ time.Duration) error {
+func (f *fakeRecorder) Complete(_ context.Context, _, _, messageID string, _ time.Duration, _ idempotency.SendEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.completed = append(f.completed, messageID)

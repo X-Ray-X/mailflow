@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -99,7 +100,7 @@ func TestClaimReplayConflictAndInFlight(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := s.Complete(ctx, account, "key-1", "msg1_sent", time.Hour); err != nil {
+	if err := s.Complete(ctx, account, "key-1", "msg1_sent", time.Hour, idempotency.SendEvent{Account: account, MessageID: "msg1_sent"}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -140,7 +141,7 @@ func TestRetentionExpiryMakesTheKeyNewAgain(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := s.Complete(ctx, "acct", "key", "msg1_sent", 100*time.Millisecond); err != nil {
+	if err := s.Complete(ctx, "acct", "key", "msg1_sent", 100*time.Millisecond, idempotency.SendEvent{Account: "acct", MessageID: "msg1_sent"}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -168,7 +169,7 @@ func TestReleaseAllowsARetry(t *testing.T) {
 	}
 
 	// Release must not remove a success.
-	if err := s.Complete(ctx, "acct", "key", "msg1_sent", time.Hour); err != nil {
+	if err := s.Complete(ctx, "acct", "key", "msg1_sent", time.Hour, idempotency.SendEvent{Account: "acct", MessageID: "msg1_sent"}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if err := s.Release(ctx, "acct", "key"); err != nil {
@@ -205,7 +206,7 @@ func TestSecondOpenKeepsTheSchemaAndRecords(t *testing.T) {
 	if got := claim(t, s, "acct", "key", []byte("hash"), time.Hour, time.Minute); got.State != idempotency.Claimed {
 		t.Fatalf("claim = %v", got.State)
 	}
-	if err := s.Complete(ctx, "acct", "key", "msg1_sent", time.Hour); err != nil {
+	if err := s.Complete(ctx, "acct", "key", "msg1_sent", time.Hour, idempotency.SendEvent{Account: "acct", MessageID: "msg1_sent"}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -221,5 +222,88 @@ func TestSecondOpenKeepsTheSchemaAndRecords(t *testing.T) {
 	}
 	if got.State != idempotency.Replay || got.MessageID != "msg1_sent" {
 		t.Fatalf("after second Open = %+v, want the earlier replay", got)
+	}
+}
+
+func resetOutbox(t *testing.T, s *Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := s.pool.Exec(ctx, "TRUNCATE send_outbox, send_events"); err != nil {
+		t.Fatalf("truncate outbox: %v", err)
+	}
+}
+
+func TestCompleteWritesOneOutboxRowAndEventConsumptionIsIdempotent(t *testing.T) {
+	s := openTestStore(t)
+	resetOutbox(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	claim, err := s.Claim(ctx, "acct", "key-outbox", []byte("hash"), time.Hour, time.Minute)
+	if err != nil || claim.State != idempotency.Claimed {
+		t.Fatalf("claim = %+v error %v", claim, err)
+	}
+	event := idempotency.SendEvent{Account: "acct", MessageID: "msg1_sent"}
+	if err := s.Complete(ctx, "acct", "key-outbox", "msg1_sent", time.Hour, event); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	rows, err := s.Unpublished(ctx, 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("unpublished = %+v error %v", rows, err)
+	}
+	if rows[0].Account != "acct" || rows[0].MessageID != "msg1_sent" || rows[0].ID == 0 {
+		t.Fatalf("event row = %+v", rows[0])
+	}
+
+	if err := s.MarkPublished(ctx, []int64{rows[0].ID}); err != nil {
+		t.Fatalf("MarkPublished: %v", err)
+	}
+	again, err := s.Unpublished(ctx, 10)
+	if err != nil || len(again) != 0 {
+		t.Fatalf("published row still pending: %+v error %v", again, err)
+	}
+
+	if err := s.RecordEvent(ctx, rows[0]); err != nil {
+		t.Fatalf("RecordEvent: %v", err)
+	}
+	if err := s.RecordEvent(ctx, rows[0]); err != nil {
+		t.Fatalf("repeat RecordEvent: %v", err)
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM send_events WHERE event_id = $1", rows[0].ID).Scan(&count); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("event rows = %d, want 1", count)
+	}
+}
+
+func TestOutboxBatchIsBounded(t *testing.T) {
+	s := openTestStore(t)
+	resetOutbox(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("key-batch-%d", i)
+		if _, err := s.Claim(ctx, "acct", key, []byte(key), time.Hour, time.Minute); err != nil {
+			t.Fatalf("Claim: %v", err)
+		}
+		if err := s.Complete(ctx, "acct", key, "msg1_"+key, time.Hour,
+			idempotency.SendEvent{Account: "acct", MessageID: "msg1_" + key}); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+	}
+	rows, err := s.Unpublished(ctx, 2)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("batch = %+v error %v", rows, err)
+	}
+	if _, err := s.Unpublished(ctx, 0); err == nil {
+		t.Fatal("accepted a zero-size batch")
+	}
+	if _, err := s.Unpublished(ctx, 101); err == nil {
+		t.Fatal("accepted an unbounded batch")
 	}
 }
