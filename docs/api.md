@@ -36,6 +36,25 @@ Build the image:
 docker buildx build --platform linux/arm64 -t mailflow-api:dev app/
 ```
 
+## Quality gates
+
+A pull request is expected to pass `ci.yml`, which checks the Compose contracts
+and then runs, in pinned toolchain images:
+
+```sh
+./app/scripts/go.sh
+docker run --rm -v "$PWD/web:/src" -w /src node:22-alpine npm ci
+docker run --rm -v "$PWD/web:/src" -w /src node:22-alpine sh -c 'npm run build && npm test'
+python3 -m py_compile app/scripts/verify-api.py
+docker run --rm -e OPENSPEC_TELEMETRY=0 -v "$PWD:/src" -w /src node:22-alpine \
+  npx --yes @fission-ai/openspec@2.0.0 validate --all --strict
+```
+
+These prove the service compiles and passes unit tests, the client builds and
+passes its tests, the verification scripts parse, and the specs are coherent. The
+live API and IMAP checks in `verify-api.py` still need a running stack; CI does
+not start mail containers.
+
 ## Configuration
 
 Everything comes from the environment and is validated at startup. A missing or

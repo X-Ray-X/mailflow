@@ -22,10 +22,14 @@ env:
   MAIL_CONTAINER: mailflow-stalwart
   APP_CONTAINER: mailflow-api
   APP_DB_CONTAINER: mailflow-db
+  APP_WEB_CONTAINER: mailflow-web
   # Published loopback port. A host property, supplied by the "production"
   # environment like MAIL_DATA_DIR, because the checkout is cleaned on every run
   # and cannot carry it. Empty means the tracked default, 8080.
   MAILFLOW_API_PORT: ${{ vars.MAILFLOW_API_PORT }}
+  # Published loopback port for the static client; empty means the tracked
+  # default, 8082.
+  MAILFLOW_WEB_PORT: ${{ vars.MAILFLOW_WEB_PORT }}
   # The application database password, supplied by the "production" environment
   # and written into the generated .env. Never committed, never printed.
   MAILFLOW_DB_PASSWORD: ${{ secrets.MAILFLOW_DB_PASSWORD }}
@@ -59,6 +63,12 @@ jobs:
           docker build --platform linux/arm64 -t "$image" app/
           echo "MAILFLOW_IMAGE=$image" >> "$GITHUB_ENV"
 
+          # The client is built from the same commit so the UI and API deployed
+          # together cannot drift. Its tag stays available for rollback too.
+          web_image="mailflow-web:${GITHUB_SHA::12}"
+          docker build --platform linux/arm64 -t "$web_image" web/
+          echo "MAILFLOW_WEB_IMAGE=$web_image" >> "$GITHUB_ENV"
+
       - name: prepare the deploy environment
         run: |
           set -euo pipefail
@@ -77,6 +87,18 @@ jobs:
           esac
           if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
             echo "error: MAILFLOW_API_PORT must be 1-65535, got '$port'" >&2
+            exit 1
+          fi
+
+          web_port="${MAILFLOW_WEB_PORT:-8082}"
+          case "$web_port" in
+            ''|*[!0-9]*)
+              echo "error: MAILFLOW_WEB_PORT must be a number, got '$web_port'" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$web_port" -lt 1 ] || [ "$web_port" -gt 65535 ] || [ "$web_port" = "$port" ]; then
+            echo "error: MAILFLOW_WEB_PORT must be 1-65535 and differ from MAILFLOW_API_PORT" >&2
             exit 1
           fi
 
@@ -100,6 +122,8 @@ jobs:
           escaped="$(printf '%s' "$db_password" | sed 's/[&|\\]/\\&/g')"
           sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
           sed -i "s|^MAILFLOW_API_PORT=.*|MAILFLOW_API_PORT=${port}|" .env
+          sed -i "s|^MAILFLOW_WEB_IMAGE=.*|MAILFLOW_WEB_IMAGE=${MAILFLOW_WEB_IMAGE}|" .env
+          sed -i "s|^MAILFLOW_WEB_PORT=.*|MAILFLOW_WEB_PORT=${web_port}|" .env
           sed -i "s|^MAILFLOW_DB_PASSWORD=.*|MAILFLOW_DB_PASSWORD=${escaped}|" .env
           chmod 600 .env
 
@@ -107,28 +131,27 @@ jobs:
         run: |
           set -euo pipefail
           cd "$APP_COMPOSE_DIR"
-          port="$(sed -n 's/^MAILFLOW_API_PORT=//p' .env)"
-          port="${port:-8080}"
-          # Docker publishes the port before the service starts, so a collision
-          # would otherwise surface as a failed start after a container was
-          # created. Name the variable the operator has to change. Match every
-          # host binding Docker reports, not just the loopback one.
-          #
-          # The application's own container may already hold the port from the
-          # previous deploy. This run replaces it, so it is not a conflict:
-          # exclude anything from the app Compose project or named as the app
-          # container before looking for a collision.
+          # Docker publishes ports before services start, so a collision would
+          # otherwise surface as a failed start after a container was created.
+          # The application's own containers may already hold them from the
+          # previous deploy; this run replaces them, so exclude the project.
           others="$(docker ps --format '{{.Label "com.docker.compose.project"}}|{{.Names}}|{{.Ports}}' \
             | awk -F'|' -v project="mailflow-app" -v app="$APP_CONTAINER" \
                 '$1 == project || $2 == app { next } { print }')"
-          if printf '%s\n' "$others" \
-            | grep -Eq "(^|[ ,|])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->"; then
-            echo "error: 127.0.0.1:${port} is already published by another container" >&2
-            echo "set MAILFLOW_API_PORT in the production environment to a free loopback port" >&2
-            printf '%s\n' "$others" \
-              | grep -E "(^|[ ,|])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->" >&2 || true
-            exit 1
-          fi
+          for entry in "MAILFLOW_API_PORT:8080" "MAILFLOW_WEB_PORT:8082"; do
+            variable="${entry%%:*}"
+            default="${entry##*:}"
+            port="$(sed -n "s/^${variable}=//p" .env)"
+            port="${port:-$default}"
+            if printf '%s\n' "$others" \
+              | grep -Eq "(^|[ ,|])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->"; then
+              echo "error: 127.0.0.1:${port} is already published by another container" >&2
+              echo "set ${variable} in the production environment to a free loopback port" >&2
+              printf '%s\n' "$others" \
+                | grep -E "(^|[ ,|])(127\.0\.0\.1|0\.0\.0\.0|\[::\]):${port}->" >&2 || true
+              exit 1
+            fi
+          done
 
       - name: copy the mail CA into the application
         run: |
@@ -166,14 +189,16 @@ jobs:
           for _ in $(seq 1 45); do
             db_status="$(docker inspect "$APP_DB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             api_status="$(docker inspect "$APP_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
-            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ]; then
+            web_status="$(docker inspect "$APP_WEB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
+            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$web_status" = "healthy" ]; then
               exit 0
             fi
             sleep 2
           done
-          echo "error: application stack did not become healthy (db=$db_status api=$api_status)" >&2
+          echo "error: application stack did not become healthy (db=$db_status api=$api_status web=$web_status)" >&2
           docker logs --tail 50 "$APP_DB_CONTAINER" >&2 || true
           docker logs --tail 50 "$APP_CONTAINER" >&2 || true
+          docker logs --tail 50 "$APP_WEB_CONTAINER" >&2 || true
           exit 1
 
       - name: verify the mail infrastructure was not modified
@@ -193,8 +218,10 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           Application deployed from ${{ github.sha }}
           Image: ${MAILFLOW_IMAGE} (built on the host, arm64)
-          Health: db healthy, api healthy
+          Web image: ${MAILFLOW_WEB_IMAGE} (built from the same commit)
+          Health: db healthy, api healthy, web healthy
           API: 127.0.0.1:${MAILFLOW_API_PORT:-8080} (host loopback)
+          Web client: 127.0.0.1:${MAILFLOW_WEB_PORT:-8082} (host loopback)
           Database: mailflow-app-db volume preserved (not published)
           Mail: unchanged — $(cat "$RUNNER_TEMP/mail-before.txt")
           EOF

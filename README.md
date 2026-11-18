@@ -16,6 +16,14 @@ A self-hosted GitHub Actions runner on the host runs the pipelines below.
 | `deploy-app.yml` | push to `main` / manual | build the service image on the host, deploy the application project, verify health and that mail was untouched |
 | `pr-agent.yml` | pull request / comment | PR-Agent review / describe / improve (advisory, never blocks) |
 
+Every pull request must pass `ci.yml`. Besides rendering both Compose projects,
+the gate runs Go formatting/vet/unit tests (`app/scripts/go.sh`), the client's
+`npm ci`, TypeScript build and unit tests in `node:22-alpine`, Python syntax
+checks for the verification scripts, and `openspec validate --all --strict`. Each
+runs in a pinned toolchain image, so the runner's installed tools do not decide
+the verdict. The application Compose assertion now includes the static `web`
+service while keeping the database private and all published ports on loopback.
+
 ### Runner
 
 - `github-runner-mailflow` — registered for `X-Ray-X/mailflow`, its own data
