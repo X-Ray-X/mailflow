@@ -76,6 +76,12 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
     ports:
       - "127.0.0.1:${MAILFLOW_WEB_PORT:-8082}:80"
     networks:
