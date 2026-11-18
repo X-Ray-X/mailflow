@@ -33,7 +33,7 @@
   no matches, a foreign mailbox, an unknown parameter, and a vendor scan of the
   new responses; verify the script exits successfully against
   `http://127.0.0.1:8081` and scans every new response.
-- [ ] 3.3 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;
+- [x] 3.3 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;
   verify formatting, vet, unit tests, and all specs pass, and state any check
   that could not run. Review `git status` and the full diff for secrets,
   unbounded reads, unhandled errors, and data-loss paths, then commit on the
