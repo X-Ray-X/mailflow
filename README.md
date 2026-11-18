@@ -85,13 +85,14 @@ publishes the read contract (mailboxes, message list, search, message content,
 attachment metadata and downloads) and the writes: sending a plain-text message,
 saving and submitting drafts, composing replies, setting a message's read and
 starred flags, moving and soft-deleting messages, and creating, renaming, and
-deleting custom mailboxes. Uploading attachments, search, and push are later
-changes.
+deleting custom mailboxes. A React web client covers the core flows through the
+same API. Uploading attachments and push are later changes.
 
 ## Layout
 
 ```
 app/                Go service: contract, mail adapter, application database, tests
+web/                React/TypeScript client, static build and unit tests
 deploy/mail/        mail infrastructure Compose project (Stalwart, pinned)
 deploy/app/         application Compose project (service and its PostgreSQL database)
 docs/               operational and integration documentation
@@ -145,11 +146,15 @@ docker compose up -d
 |---|---|
 | Mailflow API, loopback only | `http://127.0.0.1:8080/v1/` |
 | Health | `http://127.0.0.1:8080/healthz` |
+| Web client, loopback only | `http://127.0.0.1:8082/` |
 | PostgreSQL | private to the app Compose project, no published port |
 
 The database holds idempotency records for sending; it never holds mail. Its
 volume (`mailflow-app-db`) survives an application deploy or restart and is
-deleted only by an explicit `docker compose down --volumes`.
+deleted only by an explicit `docker compose down --volumes`. The web client is a
+static nginx service that proxies `/v1` to the API; see
+[`docs/web-client.md`](docs/web-client.md) for its build, scope, and manual
+verification pass.
 
 If host port 8080 is already taken, set `MAILFLOW_API_PORT` in the repository's
 `production` environment to a free loopback port. The homelab host publishes the
