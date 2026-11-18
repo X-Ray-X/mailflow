@@ -34,6 +34,7 @@ FORBIDDEN = [
     "emailsubmission", "identity/", "invalidproperties", "onsuccessupdateemail",
     "alreadyexists", "mailboxhasemail", "mailboxhaschild", "issubscribed",
     "parentid", "mayrename", "maydelete", "ondestroyremoveemails",
+    "norecipients", "forbiddenfrom",
 ]
 
 DOCUMENTED_CODES = {
@@ -105,10 +106,64 @@ def segments(identifier):
     return decoded[0], decoded[1]
 
 
+def imap_reply_headers(subject, creds, ca_path, host="mail.mailflow.test"):
+    """Fetch a reply draft's threading headers over IMAP (verification only).
+
+    The host name is kept for certificate verification while the connection is
+    patched to loopback, the same way a standard client resolves this mail host
+    on the homelab network. Returns None when the local CA is not available.
+    """
+    if not os.path.exists(ca_path):
+        return None
+    import email.policy
+    import imaplib
+    import socket
+    import ssl
+
+    real_getaddrinfo = socket.getaddrinfo
+
+    def to_loopback(name, port, *args, **kwargs):
+        return real_getaddrinfo("127.0.0.1" if name == host else name, port, *args, **kwargs)
+
+    socket.getaddrinfo = to_loopback
+    try:
+        context = ssl.create_default_context(cafile=ca_path)
+        mailbox = imaplib.IMAP4_SSL(host, 993, ssl_context=context)
+        try:
+            mailbox.login(creds[0], creds[1])
+            mailbox.select("Drafts")
+            # A JMAP create can take a moment to appear in the IMAP index, so
+            # bound the wait rather than failing on a race.
+            deadline = time.monotonic() + 10
+            while True:
+                found = mailbox.search(None, "SUBJECT", '"' + subject + '"')
+                seq = found[1][0].split()[-1] if found[0] == "OK" and found[1] and found[1][0].strip() else None
+                if seq is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    return {}
+                time.sleep(0.5)
+            fetched = mailbox.fetch(seq, "(BODY.PEEK[HEADER])")
+            raw = next((part for part in fetched[1] if isinstance(part, tuple)), None)
+            if raw is None:
+                return {}
+            message = email.message_from_bytes(raw[1], policy=email.policy.default)
+            return {name: message.get(name) for name in ("In-Reply-To", "References")}
+        finally:
+            try:
+                mailbox.logout()
+            except Exception:
+                pass
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default=os.environ.get("MAILFLOW_BASE", DEFAULT_BASE))
     parser.add_argument("--env-file", default=DEFAULT_ENV)
+    parser.add_argument("--ca-file", default="deploy/mail/data/tls/ca.pem",
+                        help="mail CA used for the optional IMAP threading check")
     args = parser.parse_args()
 
     env = read_env(args.env_file)
@@ -350,6 +405,160 @@ def main():
                      f"status={status} body={updated}")
     else:
         print("SKIP no attachment in bob's inbox to check flag preservation")
+
+    # --- drafts and replies -------------------------------------------------
+    bob_drafts = next(b for b in boxes["bob"] if b["role"] == "drafts")
+    bob_sent = next(b for b in boxes["bob"] if b["role"] == "sent")
+
+    def drafts_contains(identifier, mailbox=bob_drafts):
+        status, _, listing = api.call(f"/v1/mailboxes/{mailbox['id']}/messages?limit=100", bob_creds)
+        return status == 200 and any(m["id"] == identifier for m in (listing.get("messages") or []))
+
+    created_draft_ids = []
+    try:
+        status, _, empty = api.call("/v1/drafts", bob_creds, method="POST", body={})
+        empty_id = empty.get("id") or ""
+        created_draft_ids.append(empty_id)
+        report.check("bob: an empty draft can be saved",
+                     status == 201 and empty_id.startswith("msg1_"), f"status={status} body={empty}")
+        report.check("an empty draft is listed in drafts", drafts_contains(empty_id),
+                     f"id={empty_id}")
+
+        empty_key = f"verify-draft-{stamp}"
+        status, _, body = api.call(f"/v1/drafts/{empty_id}/send", bob_creds, method="POST",
+                                   headers={"Idempotency-Key": empty_key})
+        report.check("an empty draft cannot be submitted",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+        report.check("a refused draft stays in drafts", drafts_contains(empty_id), "")
+
+        draft_subject = f"Draft verifier {stamp}"
+        draft_body = {
+            "to": [{"name": "Alice", "email": alice_creds[0]}],
+            "subject": draft_subject,
+            "text": "Saved by app/scripts/verify-api.py.\n",
+        }
+        status, _, draft = api.call("/v1/drafts", bob_creds, method="POST", body=draft_body)
+        draft_id = draft.get("id") or ""
+        created_draft_ids.append(draft_id)
+        report.check("bob: a complete draft can be saved",
+                     status == 201 and draft_id.startswith("msg1_"), f"status={status} body={draft}")
+        report.check("a complete draft is listed in drafts", drafts_contains(draft_id), "")
+        status, _, detail = api.call(f"/v1/messages/{draft_id}", bob_creds)
+        report.check("a draft's body is readable",
+                     status == 200 and detail.get("text") == draft_body["text"]
+                     and detail.get("subject") == draft_subject,
+                     f"status={status} subject={detail.get('subject')!r}")
+
+        status, _, body = api.call(f"/v1/drafts/{draft_id}/send", bob_creds, method="POST")
+        report.check("a draft submission needs a key",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        # The empty-draft refusal released this key, so the same key may now be
+        # used for a submission that succeeds.
+        status, headers, submitted = api.call(f"/v1/drafts/{draft_id}/send", bob_creds,
+                                              method="POST",
+                                              headers={"Idempotency-Key": empty_key})
+        report.check("a draft can be submitted",
+                     status == 201 and submitted.get("id") == draft_id,
+                     f"status={status} body={submitted}")
+        report.check("a first draft submission is not a replay",
+                     not (headers.get("Idempotency-Replayed") or ""),
+                     headers.get("Idempotency-Replayed") or "")
+
+        status, headers, replay = api.call(f"/v1/drafts/{draft_id}/send", bob_creds,
+                                           method="POST",
+                                           headers={"Idempotency-Key": empty_key})
+        report.check("a draft submission replay sends nothing",
+                     status == 201 and replay.get("id") == draft_id
+                     and (headers.get("Idempotency-Replayed") or "") == "true",
+                     f"status={status} body={replay}")
+
+        status, _, body = api.call(f"/v1/drafts/{empty_id}/send", bob_creds, method="POST",
+                                   headers={"Idempotency-Key": empty_key})
+        report.check("a key reused for another draft is a conflict",
+                     status == 409 and body.get("code") == "conflict",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call(f"/v1/drafts/{draft_id}/send", bob_creds, method="POST",
+                                   headers={"Idempotency-Key": f"verify-again-{stamp}"})
+        report.check("a sent message cannot be submitted again",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        status, _, body = api.call(f"/v1/drafts/{empty_id}/send", alice_creds, method="POST",
+                                   headers={"Idempotency-Key": f"verify-foreign-{stamp}"})
+        report.check("alice cannot submit bob's draft",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{empty_id}", alice_creds)
+        report.check("alice cannot read bob's draft",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+
+        report.check("a submitted draft leaves drafts", not drafts_contains(draft_id), "")
+        report.check("a submitted draft appears in sent", drafts_contains(draft_id, bob_sent), "")
+        status, _, detail = api.call(f"/v1/messages/{draft_id}", bob_creds)
+        report.check("a submitted draft keeps its identifier and content",
+                     status == 200 and detail.get("id") == draft_id
+                     and detail.get("text") == draft_body["text"],
+                     f"status={status}")
+
+        reply_source = received["id"] if received is not None else summary["id"]
+        reply_text = f"Reply verifier {stamp}"
+        status, _, reply = api.call(f"/v1/messages/{reply_source}/reply", bob_creds,
+                                    method="POST", body={"text": reply_text})
+        reply_id = reply.get("id") or ""
+        created_draft_ids.append(reply_id)
+        report.check("bob: a reply can be composed",
+                     status == 201 and reply_id.startswith("msg1_"), f"status={status} body={reply}")
+        report.check("a reply is a draft in drafts", drafts_contains(reply_id), "")
+        status, _, detail = api.call(f"/v1/messages/{reply_id}", bob_creds)
+        expected_subject = "Re: " + subject
+        report.check("a reply has the original sender, one prefix, and the caller's body",
+                     status == 200 and detail.get("subject") == expected_subject
+                     and detail.get("text") == reply_text
+                     and len(detail.get("to") or []) == 1
+                     and detail["to"][0]["email"] == alice_creds[0],
+                     f"status={status} detail={detail}")
+
+        status, _, second = api.call(f"/v1/messages/{reply_id}/reply", bob_creds,
+                                     method="POST", body={"text": "second"})
+        created_draft_ids.append(second.get("id") or "")
+        status, _, second_detail = api.call(f"/v1/messages/{second.get('id')}", bob_creds)
+        report.check("a reply to a reply does not add a second prefix",
+                     status == 200 and second_detail.get("subject") == expected_subject,
+                     f"status={status} subject={second_detail.get('subject')!r}")
+
+        status, _, body = api.call(f"/v1/messages/{reply_source}/reply", alice_creds,
+                                   method="POST", body={"text": "hi"})
+        report.check("alice cannot reply to bob's message",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{alice_message['id']}/reply", bob_creds,
+                                   method="POST", body={"text": "hi"})
+        report.check("bob cannot reply to alice's message",
+                     status == 404 and body.get("code") == "not_found",
+                     f"status={status} body={body}")
+        status, _, body = api.call(f"/v1/messages/{reply_source}/reply", bob_creds,
+                                   method="POST", body={"text": "hi", "quote": True})
+        report.check("a reply with an unknown field is refused",
+                     status == 400 and body.get("code") == "invalid_request",
+                     f"status={status} body={body}")
+
+        imap_headers = imap_reply_headers(expected_subject, bob_creds, args.ca_file)
+        if imap_headers is None:
+            print("SKIP threading headers: local mail CA is not available")
+        else:
+            report.check("a reply draft carries In-Reply-To", bool(imap_headers.get("In-Reply-To")),
+                         str(imap_headers))
+            report.check("a reply draft carries References", bool(imap_headers.get("References")),
+                         str(imap_headers))
+    finally:
+        for identifier in set(created_draft_ids):
+            if identifier:
+                api.call(f"/v1/messages/{identifier}", bob_creds, method="DELETE")
 
     # --- mailbox organization ----------------------------------------------
     # Every object created here is removed again, including on a failed check.

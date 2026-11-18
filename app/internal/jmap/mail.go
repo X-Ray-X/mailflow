@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -48,9 +49,14 @@ type Email struct {
 	From          []Address            `json:"from"`
 	To            []Address            `json:"to"`
 	Cc            []Address            `json:"cc"`
+	Bcc           []Address            `json:"bcc"`
 	ReceivedAt    time.Time            `json:"receivedAt"`
 	Keywords      map[string]bool      `json:"keywords"`
+	MailboxIDs    map[string]bool      `json:"mailboxIds"`
 	HasAttachment bool                 `json:"hasAttachment"`
+	MessageID     []string             `json:"messageId"`
+	InReplyTo     []string             `json:"inReplyTo"`
+	References    []string             `json:"references"`
 	TextBody      []BodyPart           `json:"textBody"`
 	BodyValues    map[string]BodyValue `json:"bodyValues"`
 }
@@ -458,6 +464,225 @@ func (c *Client) SendMessage(ctx context.Context, creds Credentials, accountID s
 		return createdID, fmt.Errorf("%w: submission returned no identifier", ErrUpstream)
 	}
 	return createdID, nil
+}
+
+// DraftContent is a plain-text draft the service creates in the drafts mailbox.
+// Reply fields are set in header form because the pinned release ignores the
+// derived inReplyTo and references properties on create; the header form was
+// probed and survives submission (see docs/integration-surface.md).
+type DraftContent struct {
+	DraftsMailboxID string
+	From            Address
+	To              []Address
+	Cc              []Address
+	Bcc             []Address
+	Subject         string
+	Text            string
+	InReplyTo       []string
+	References      []string
+}
+
+// CreateDraft creates a message in the drafts mailbox and returns its server
+// identifier. Empty recipients, subject, and body are accepted by the server,
+// which is what lets a client save an incomplete draft.
+func (c *Client) CreateDraft(ctx context.Context, creds Credentials, accountID string, d DraftContent) (string, error) {
+	const createID = "mf-create"
+	create := map[string]any{
+		"mailboxIds": map[string]bool{d.DraftsMailboxID: true},
+		"keywords":   map[string]bool{"$draft": true},
+		"from":       addressObjects([]Address{d.From}),
+		"subject":    d.Subject,
+		"textBody":   []map[string]string{{"partId": "text", "type": "text/plain"}},
+		"bodyValues": map[string]any{"text": map[string]string{"value": d.Text}},
+	}
+	if len(d.To) > 0 {
+		create["to"] = addressObjects(d.To)
+	}
+	if len(d.Cc) > 0 {
+		create["cc"] = addressObjects(d.Cc)
+	}
+	if len(d.Bcc) > 0 {
+		create["bcc"] = addressObjects(d.Bcc)
+	}
+	if len(d.InReplyTo) > 0 {
+		create["header:In-Reply-To:asText"] = messageIDList(d.InReplyTo)
+	}
+	if len(d.References) > 0 {
+		create["header:References:asText"] = messageIDList(d.References)
+	}
+
+	raw, err := c.Call(ctx, creds, "Email/set", map[string]any{
+		"accountId": accountID,
+		"create":    map[string]any{createID: create},
+	})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Created map[string]struct {
+			ID string `json:"id"`
+		} `json:"created"`
+		NotCreated map[string]struct {
+			Type string `json:"type"`
+		} `json:"notCreated"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("%w: decode Email/set: %v", ErrUpstream, err)
+	}
+	if entry, ok := out.NotCreated[createID]; ok {
+		switch entry.Type {
+		case "invalidProperties":
+			return "", ErrInvalidInput
+		case "notFound":
+			return "", ErrNotFound
+		default:
+			return "", fmt.Errorf("%w: draft refused (%s)", ErrUpstream, entry.Type)
+		}
+	}
+	created, ok := out.Created[createID]
+	if !ok || created.ID == "" {
+		return "", fmt.Errorf("%w: draft create returned no identifier", ErrUpstream)
+	}
+	return created.ID, nil
+}
+
+// SendDraft submits an existing message as the caller. The envelope is explicit
+// so the service's local-domain rule also covers a Bcc that another client set.
+// The success update moves the same message out of drafts into sent and clears
+// the draft keyword, so its identifier does not change.
+func (c *Client) SendDraft(ctx context.Context, creds Credentials, accountID, draftsMailboxID, sentMailboxID, identityID, emailID string, from Address, recipients []Address) error {
+	const submitID = "mf-submit"
+	rcptTo := make([]map[string]string, 0, len(recipients))
+	for _, a := range recipients {
+		rcptTo = append(rcptTo, map[string]string{"email": a.Email})
+	}
+
+	// A successful submission with onSuccessUpdateEmail answers with a second
+	// Email/set response, so the call is made as a batch and matched by method
+	// and client id rather than by position.
+	results, err := c.Batch(ctx, creds, []Call{{
+		Method: "EmailSubmission/set",
+		Args: map[string]any{
+			"accountId": accountID,
+			"create": map[string]any{submitID: map[string]any{
+				"identityId": identityID,
+				"emailId":    emailID,
+				"envelope": map[string]any{
+					"mailFrom": map[string]string{"email": from.Email},
+					"rcptTo":   rcptTo,
+				},
+			}},
+			"onSuccessUpdateEmail": map[string]any{
+				"#" + submitID: map[string]any{
+					"mailboxIds/" + draftsMailboxID: nil,
+					"mailboxIds/" + sentMailboxID:   true,
+					"keywords/$seen":                true,
+					"keywords/$draft":               nil,
+				},
+			},
+		},
+		ClientID: submitID,
+	}})
+	if err != nil {
+		return err
+	}
+	submission := findResult(results, "EmailSubmission/set", submitID)
+	if submission == nil {
+		return fmt.Errorf("%w: submission produced no response", ErrUpstream)
+	}
+	if submission.Err != nil {
+		if errors.Is(submission.Err, ErrUnauthorized) || errors.Is(submission.Err, ErrUnavailable) || errors.Is(submission.Err, ErrTimeout) {
+			return submission.Err
+		}
+		return fmt.Errorf("%w: %v", ErrRejected, submission.Err)
+	}
+	var out struct {
+		Created map[string]struct {
+			ID string `json:"id"`
+		} `json:"created"`
+		NotCreated map[string]struct {
+			Type string `json:"type"`
+		} `json:"notCreated"`
+	}
+	if err := json.Unmarshal(submission.Args, &out); err != nil {
+		return fmt.Errorf("%w: decode EmailSubmission/set: %v", ErrUpstream, err)
+	}
+	if entry, ok := out.NotCreated[submitID]; ok {
+		if entry.Type == "noRecipients" {
+			// The caller can fix this by adding a recipient to the draft.
+			return ErrInvalidInput
+		}
+		// The refusal description names the address and is vendor text; only
+		// the type is kept, and only for the log.
+		return fmt.Errorf("%w: submission refused (%s)", ErrRejected, entry.Type)
+	}
+	if _, ok := out.Created[submitID]; !ok {
+		return fmt.Errorf("%w: submission returned no identifier", ErrUpstream)
+	}
+	return nil
+}
+
+// GetDraft reads the content a submission needs: recipients including Bcc, the
+// draft keyword, and the text body. Unknown identifiers are reported as
+// ErrNotFound rather than an empty result.
+func (c *Client) GetDraft(ctx context.Context, creds Credentials, accountID, emailID string, maxBodyBytes int64) (Email, error) {
+	return c.getEmail(ctx, creds, accountID, emailID, []string{
+		"id", "subject", "from", "to", "cc", "bcc", "keywords", "mailboxIds",
+	}, true, maxBodyBytes)
+}
+
+// GetReplySource reads the fields reply composition needs. The Message-ID values
+// stay inside this package; the public model never carries them.
+func (c *Client) GetReplySource(ctx context.Context, creds Credentials, accountID, emailID string) (Email, error) {
+	return c.getEmail(ctx, creds, accountID, emailID, []string{
+		"id", "subject", "from", "messageId", "inReplyTo", "references",
+	}, false, 0)
+}
+
+// getEmail fetches one message with an explicit property list. The list is
+// always explicit: the default response carries identifiers and vendor detail
+// the public contract must not see.
+func (c *Client) getEmail(ctx context.Context, creds Credentials, accountID, emailID string, properties []string, includeBody bool, maxBodyBytes int64) (Email, error) {
+	args := map[string]any{
+		"accountId":  accountID,
+		"ids":        []string{emailID},
+		"properties": append([]string(nil), properties...),
+	}
+	if includeBody {
+		args["properties"] = append(args["properties"].([]string), "textBody", "bodyValues")
+		args["bodyProperties"] = []string{"partId", "type", "name", "disposition"}
+		args["fetchTextBodyValues"] = true
+		args["maxBodyValueBytes"] = maxBodyBytes
+	}
+
+	raw, err := c.Call(ctx, creds, "Email/get", args)
+	if err != nil {
+		return Email{}, err
+	}
+	var out struct {
+		List []Email `json:"list"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return Email{}, fmt.Errorf("%w: decode Email/get: %v", ErrUpstream, err)
+	}
+	if len(out.List) == 0 {
+		return Email{}, ErrNotFound
+	}
+	return out.List[0], nil
+}
+
+// messageIDList renders Message-ID values in the angle-bracket form a header
+// expects. Blank values are dropped rather than producing an empty pair.
+func messageIDList(ids []string) string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		out = append(out, "<"+id+">")
+	}
+	return strings.Join(out, " ")
 }
 
 // DestroyEmails removes messages by server identifier. It is used to

@@ -4,10 +4,11 @@ The Go service that publishes Mailflow's HTTP contract. It adapts to the mail
 server through JMAP and translates the result into Mailflow identifiers and
 vocabulary; nothing in a response is vendor-shaped.
 
-The contract covers reads and writes: sending a plain-text message, changing a
-message's read and starred flags, moving it between mailboxes, deleting it to
-trash, and creating, renaming, and deleting custom mailboxes. Attachments,
-search, and push are later changes.
+The contract covers reads and writes: sending a plain-text message, saving and
+submitting drafts, replying to a message, changing a message's read and starred
+flags, moving it between mailboxes, deleting it to trash, and creating,
+renaming, and deleting custom mailboxes. Attachments, search, and push are later
+changes.
 
 ## Runtime and build
 
@@ -132,9 +133,9 @@ instance, using the demo accounts from `deploy/mail/.env`:
 ```
 
 It checks paging, body content, cross-account refusal, malformed input, sending
-and replay, flag updates, mailbox creation, rename and deletion, message moves
-and soft deletion, and scans every response it receives — reads and writes — for
-vendor vocabulary.
+and replay, draft creation and submission, replies and threading, flag updates,
+mailbox creation, rename and deletion, message moves and soft deletion, and scans
+every response it receives — reads and writes — for vendor vocabulary.
 
 ## Endpoints
 
@@ -325,6 +326,97 @@ and retry. When the outcome is unknown (a timeout or an unreachable mail
 server), the claim is kept for the lease window so a retry cannot deliver a
 duplicate; the caller should treat the first attempt as unknown.
 
+### `POST /v1/drafts`
+
+Saves a plain-text draft in the caller's drafts mailbox.
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "to": [{"name": "Bob", "email": "bob@mailflow.test"}],
+    "subject": "Lunch",
+    "text": "Noon?"
+  }' \
+  http://127.0.0.1:8080/v1/drafts
+```
+
+Success is `201` with the draft's Mailflow identifier:
+
+```json
+{ "id": "msg1_ZA.ZDFkYWZm" }
+```
+
+Every field is optional: `{}` saves an empty draft that a client can complete
+later. `cc` may be omitted. The same recipient-domain rule, recipient count, and
+body size as a send apply, so a draft saved here can be submitted unchanged; an
+outside address or oversized input is `invalid_request`. An unknown field is
+also `invalid_request`.
+
+Draft creation takes **no** `Idempotency-Key`. It changes mailbox state rather
+than delivering mail, so a duplicate is visible and recoverable: delete the
+extra draft. A retry after a lost response can leave two drafts.
+
+Draft content is immutable. There is no edit endpoint, because the mail server
+refuses content updates. To change a draft, save a new one with `POST
+/v1/drafts`, then delete the old one with `DELETE /v1/messages/{messageID}`.
+The old draft moves to trash rather than being erased, so a client that stops
+halfway leaves two visible drafts and loses nothing. Do not store the old
+identifier and expect it to follow the new content: each save creates a new
+message with a new identifier.
+
+### `POST /v1/drafts/{draftID}/send`
+
+Submits an existing draft. The message leaves drafts, appears in sent, and keeps
+the identifier the draft had. A draft authored by another client is sendable
+too: the service reads its To, Cc, and Bcc and checks every address before
+submitting. Bcc is never returned in a message body.
+
+The `Idempotency-Key` header is required, with the same rules as a send. A first
+submission answers `201` with the draft's identifier; a replay answers `201`
+with the same body and `Idempotency-Replayed: true`; the same key with another
+draft is `409 conflict`, and a concurrent duplicate is `409 in_progress`.
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Idempotency-Key: 1c8e1d3e-5a4b-4a62-9f0b-7e2d6a1c4f88' \
+  -X POST \
+  http://127.0.0.1:8080/v1/drafts/msg1_ZA.ZDFkYWZm/send
+```
+
+A message that is not a draft, or a draft with no recipients, answers
+`invalid_request` and stays where it is. If the mail server declines the
+submission the answer is `send_rejected` and the draft stays in drafts. An
+unknown or foreign identifier is `not_found`. All these refusals release the
+key, so the caller may correct the draft and retry with the same key. A timeout
+or an unreachable mail server keeps the claim for the lease window instead,
+because the outcome is unknown.
+
+### `POST /v1/messages/{messageID}/reply`
+
+Creates a draft reply to a message the caller can read.
+
+```sh
+curl -sS -u "$MAILFLOW_USER:$MAILFLOW_PASSWORD" \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Sounds good."}' \
+  http://127.0.0.1:8080/v1/messages/msg1_ZA.YjJhYWFhYXA/reply
+```
+
+Success is `201` with the new draft's Mailflow identifier:
+
+```json
+{ "id": "msg1_ZA.ZTExZmZm" }
+```
+
+The recipient is the original sender, the subject gains one `Re: ` prefix
+(unless it already has one), and the original message's threading is carried so
+a standard client groups the reply with the conversation. The body is the
+caller's text exactly: the service does not quote the original, add a signature,
+or reply to everyone. Recipient and body bounds are the same as a send. Like
+draft creation, a reply takes no idempotency key. An unknown or foreign original
+is `not_found`, and nothing is created.
+
 ### `PATCH /v1/messages/{messageID}`
 
 Sets a message's flags and optionally moves it. The request states the desired
@@ -443,9 +535,10 @@ stack traces, or credentials.
 
 ## Idempotency retention
 
-A completed send key replays its result for `MAILFLOW_IDEMPOTENCY_TTL` (default
-24 hours). After that the record expires and a retry with the same key is a new
-send, so a client that retries days later must not assume the original result.
+A completed send or draft-submission key replays its result for
+`MAILFLOW_IDEMPOTENCY_TTL` (default 24 hours). After that the record expires and
+a retry with the same key is a new submission, so a client that retries days
+later must not assume the original result.
 An unfinished claim blocks its key for `MAILFLOW_IDEMPOTENCY_LEASE` (default 2
 minutes); after the lease a retry may take over, which bounds a duplicate but
 cannot prove the first attempt did not happen. Records live in the application

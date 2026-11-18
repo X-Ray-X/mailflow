@@ -366,6 +366,69 @@ and `SEARCH ALL` returned the moved message. After the message was moved back
 and the mailbox deleted through the API, a second `LIST` no longer showed it.
 The mailbox's role was absent, so the public model reports it as `custom`.
 
+### Drafts and replies (probed 2026-11-18)
+
+Exercised with `bob@mailflow.test` on the same pinned release. The account id was
+`d`; identifiers below are this account's, so they are examples, not stable
+values. The probe created drafts, tried every plausible content update,
+submitted an existing message, and read the threading fields back.
+
+- **A draft is an ordinary message in the drafts mailbox with `$draft`.** Create
+  takes `mailboxIds`, `keywords`, `from`, `to`, `subject`, `textBody`, and
+  `bodyValues`. A draft with no recipients, no subject, and an empty body was
+  accepted, so an incomplete draft is representable.
+- **Message content is immutable.** `Email/set` update accepted `keywords/*` and
+  `mailboxIds` but refused every content field: `subject`, `to`, `textBody`,
+  `bodyValues`, `bodyValues/0/value`, `header:Subject:asText`, and `blobId` each
+  answered `notUpdated` with `invalidProperties` (the body-value patch said
+  `Invalid patch value`). There is no in-place draft edit.
+- **An existing message can be submitted.** `EmailSubmission/set` create accepts
+  `emailId` naming an existing message. With `onSuccessUpdateEmail` the same
+  message leaves drafts, appears in sent, loses `$draft`, gains `$seen`, and
+  keeps its identifier.
+- **Threading must be set in header form.** On create, the derived `inReplyTo`
+  and `references` properties were silently ignored and read back as `null`.
+  `header:In-Reply-To:asText` and `header:References:asText` were stored, read
+  back through `inReplyTo` and `references`, and survived submission.
+- **`Email/get` cannot fetch `header:...` properties.** Asking for
+  `header:In-Reply-To:asText` returned a method error with type
+  `invalidArguments` naming the header property. The derived properties are the
+  readable form. `messageId` is returned as a list of strings.
+- **A submission with no recipients is refused.** The response is `notCreated`
+  with type `noRecipients`, and the draft stays in drafts.
+- **An omitted envelope is accepted.** An explicit envelope also works; one that
+  included a Bcc recipient delivered to that address, and the sent copy still
+  reported `bcc`.
+- **A submission answers with `id`, `sendAt`, and `undoStatus: pending`.** The
+  service does not use the undo window.
+- **Unexercised at the JMAP boundary:** submitting a message that is not a draft
+  (the service checks `$draft` first and refuses it), and the undo request itself.
+
+### Live reply check over IMAP (2026-11-18)
+
+After the implementation, a reply was composed through the HTTP API and read
+back over IMAP. The check is part of the repo's verifier, so it is repeatable:
+
+```
+./app/scripts/verify-api.py --base http://127.0.0.1:8081
+```
+
+The verifier logs in as the demo account, selects `Drafts`, and searches by the
+reply's subject (with a bounded wait, because a JMAP create can take a moment to
+appear in the IMAP index). It then fetches the header block. Observed result for
+a reply to a message that already had one reference:
+
+```
+PASS a reply draft carries In-Reply-To — {'In-Reply-To': '<18e92081e0f467e5.cedde9dfce977d37.2a0f6f34a65f822b@mail.mailflow.test>', 'References': '<18e92081dd4bf64d.1ef9119f0be82e0.db7d399e029100a8@mail.mailflow.test> <18e92081e0f467e5.cedde9dfce977d37.2a0f6f34a65f822b@mail.mailflow.test>'}
+PASS a reply draft carries References — {'In-Reply-To': '<18e92081e0f467e5.cedde9dfce977d37.2a0f6f34a65f822b@mail.mailflow.test>', 'References': '<18e92081dd4bf64d.1ef9119f0be82e0.db7d399e029100a8@mail.mailflow.test> <18e92081e0f467e5.cedde9dfce977d37.2a0f6f34a65f822b@mail.mailflow.test>'}
+```
+
+Finding the message by subject in `Drafts` confirms the reply is visible as a
+draft in a standard client. `In-Reply-To` names the original message;
+`References` holds the original's reference followed by its Message-ID, which
+also confirms the multi-reference rule that the earlier direct probe had not
+exercised. The full run reported `payloads scanned: 106` and `FAILURES: none`.
+
 ## Push notifications
 
 `eventSourceUrl` is a template with three parameters:
