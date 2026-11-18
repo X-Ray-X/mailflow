@@ -39,6 +39,7 @@ type fakeReader struct {
 	createDraftFn func(context.Context, mail.Draft) (string, error)
 	sendDraftFn   func(context.Context, string) (string, error)
 	replyFn       func(context.Context, string, string) (string, error)
+	searchFn      func(context.Context, mail.SearchRequest) (mail.Page, error)
 	attachmentsFn func(context.Context, string) ([]mail.Attachment, error)
 	downloadFn    func(context.Context, string, int) (mail.AttachmentDownload, error)
 	updateFn      func(context.Context, string, mail.MessagePatch) (mail.MessageSummary, error)
@@ -52,6 +53,7 @@ type fakeReader struct {
 	gotDraft       mail.Draft
 	gotDraftID     string
 	gotReplyText   string
+	gotSearch      mail.SearchRequest
 	gotPosition    int
 	gotMessageID   string
 	gotPatch       mail.MessagePatch
@@ -145,6 +147,17 @@ func (f *fakeReader) Reply(ctx context.Context, creds mail.Credentials, messageI
 		return f.replyFn(ctx, messageID, text)
 	}
 	return "", nil
+}
+
+func (f *fakeReader) Search(ctx context.Context, creds mail.Credentials, req mail.SearchRequest) (mail.Page, error) {
+	f.record(creds)
+	f.mu.Lock()
+	f.gotSearch = req
+	f.mu.Unlock()
+	if f.searchFn != nil {
+		return f.searchFn(ctx, req)
+	}
+	return mail.Page{}, nil
 }
 
 func (f *fakeReader) Attachments(ctx context.Context, creds mail.Credentials, messageID string) ([]mail.Attachment, error) {
@@ -1958,5 +1971,117 @@ func TestAttachmentPathsRequireGet(t *testing.T) {
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			t.Fatalf("%s: status = %d, want 405", path, resp.StatusCode)
 		}
+	}
+}
+
+func TestSearchReturnsMessageSummaries(t *testing.T) {
+	f := &fakeReader{searchFn: func(context.Context, mail.SearchRequest) (mail.Page, error) {
+		return mail.Page{
+			Messages:   []mail.MessageSummary{{ID: "msg1_a", Subject: "Lunch"}},
+			NextCursor: "cur1_next",
+			HasMore:    true,
+		}, nil
+	}}
+	srv := newTestServer(t, f, Options{PageSizeMax: 100})
+
+	resp := request(t, srv, http.MethodGet, "/v1/search?q=Lunch&limit=5&cursor=cur1_prev", &testCreds)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, body(t, resp))
+	}
+	var got messagesResponse
+	if err := json.Unmarshal(body(t, resp), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].ID != "msg1_a" || !got.HasMore || got.NextCursor != "cur1_next" {
+		t.Fatalf("response = %+v", got)
+	}
+	f.mu.Lock()
+	search := f.gotSearch
+	f.mu.Unlock()
+	if search.Text != "Lunch" || search.Page.Limit != 5 || search.Page.Cursor != "cur1_prev" || search.MailboxID != "" {
+		t.Fatalf("search request = %+v", search)
+	}
+	if strings.Contains(strings.ToLower(string(body(t, resp))), "inmailbox") {
+		t.Fatal("response carries a vendor filter name")
+	}
+}
+
+func TestSearchAcceptsAMailboxRestriction(t *testing.T) {
+	f := &fakeReader{}
+	srv := newTestServer(t, f, Options{})
+	resp := request(t, srv, http.MethodGet, "/v1/search?q=Lunch&mailboxId=mb1_a", &testCreds)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	f.mu.Lock()
+	search := f.gotSearch
+	f.mu.Unlock()
+	if search.MailboxID != "mb1_a" {
+		t.Fatalf("mailboxId = %q", search.MailboxID)
+	}
+}
+
+func TestSearchRejectsBadRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		code string
+	}{
+		{"no query", "/v1/search", codeInvalidRequest},
+		{"whitespace query", "/v1/search?q=%20%20", codeInvalidRequest},
+		{"unknown parameter", "/v1/search?q=Lunch&inMailbox=m1", codeInvalidRequest},
+		{"bad limit", "/v1/search?q=Lunch&limit=zero", codeInvalidRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{searchFn: func(context.Context, mail.SearchRequest) (mail.Page, error) {
+				t.Fatal("a bad search reached the mail service")
+				return mail.Page{}, nil
+			}}
+			srv := newTestServer(t, f, Options{})
+			resp := request(t, srv, http.MethodGet, tc.path, &testCreds)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, body(t, resp))
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestSearchRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"foreign mailbox", mail.ErrNotFound, http.StatusNotFound, codeNotFound},
+		{"stale cursor", mail.ErrInvalidCursor, http.StatusBadRequest, codeInvalidCursor},
+		{"outage", mail.ErrUnavailable, http.StatusServiceUnavailable, codeServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeReader{searchFn: func(context.Context, mail.SearchRequest) (mail.Page, error) {
+				return mail.Page{}, tc.err
+			}}
+			srv := newTestServer(t, f, Options{})
+			resp := request(t, srv, http.MethodGet, "/v1/search?q=Lunch", &testCreds)
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.status)
+			}
+			if got := decodeError(t, resp); got.Code != tc.code {
+				t.Fatalf("error = %+v, want %q", got, tc.code)
+			}
+		})
+	}
+}
+
+func TestSearchRequiresGet(t *testing.T) {
+	srv := newTestServer(t, &fakeReader{}, Options{})
+	resp := request(t, srv, http.MethodPost, "/v1/search?q=Lunch", &testCreds)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
 }

@@ -130,11 +130,21 @@ type Page struct {
 	HasMore    bool
 }
 
+// SearchRequest is a text query over the caller's mail. An empty MailboxID
+// searches every mailbox; a set one restricts results to that mailbox.
+type SearchRequest struct {
+	Text      string
+	MailboxID string
+	Page      PageRequest
+}
+
 // Reader is the read side of the HTTP contract.
 type Reader interface {
 	Mailboxes(ctx context.Context, creds Credentials) ([]Mailbox, error)
 	Messages(ctx context.Context, creds Credentials, mailboxID string, page PageRequest) (Page, error)
 	Message(ctx context.Context, creds Credentials, messageID string) (Message, error)
+	// Search returns one page of message summaries matching a text query.
+	Search(ctx context.Context, creds Credentials, req SearchRequest) (Page, error)
 	// Attachments lists readable attachment metadata for one message.
 	Attachments(ctx context.Context, creds Credentials, messageID string) ([]Attachment, error)
 	// DownloadAttachment opens one bounded attachment stream.
@@ -390,6 +400,99 @@ func (s *Service) Message(ctx context.Context, creds Credentials, messageID stri
 		return Message{}, ErrNotFound
 	}
 	return MapMessage(account, list[0], s.bodyMaxBytes), nil
+}
+
+// Search answers a text query with one page of message summaries. The optional
+// mailbox is checked against the caller's account before any upstream call; raw
+// mail server identifiers are reused across accounts, so a foreign identifier
+// must not be resolved by the mail server on the caller's behalf.
+func (s *Service) Search(ctx context.Context, creds Credentials, req SearchRequest) (Page, error) {
+	var (
+		mailboxAccount string
+		vendorMailbox  string
+		err            error
+	)
+	if req.MailboxID != "" {
+		mailboxAccount, vendorMailbox, err = ids.ParseMailbox(req.MailboxID)
+		if err != nil {
+			return Page{}, ErrNotFound
+		}
+	}
+
+	limit := req.Page.Limit
+	if limit <= 0 {
+		limit = s.pageSizeDefault
+	}
+	if limit > s.pageSizeMax {
+		limit = s.pageSizeMax
+	}
+
+	var (
+		anchor        string
+		cursorAccount string
+	)
+	if req.Page.Cursor != "" {
+		cursorAccount, anchor, err = ids.ParseCursor(req.Page.Cursor)
+		if err != nil {
+			return Page{}, ErrInvalidCursor
+		}
+	}
+
+	account, err := s.account(ctx, creds)
+	if err != nil {
+		return Page{}, err
+	}
+	if req.MailboxID != "" {
+		if mailboxAccount != account {
+			return Page{}, ErrNotFound
+		}
+		exists, err := s.upstream.MailboxExists(ctx, toJMAP(creds), account, vendorMailbox)
+		if err != nil {
+			return Page{}, mapError(err)
+		}
+		if !exists {
+			return Page{}, ErrNotFound
+		}
+	}
+	if cursorAccount != "" && cursorAccount != account {
+		return Page{}, ErrInvalidCursor
+	}
+
+	result, err := s.upstream.QueryEmails(ctx, toJMAP(creds), account, jmap.Query{
+		MailboxID: vendorMailbox,
+		Text:      req.Text,
+		Limit:     limit,
+		Anchor:    anchor,
+	})
+	if err != nil {
+		return Page{}, mapError(err)
+	}
+
+	pageOut := Page{
+		Messages: []MessageSummary{},
+		HasMore:  result.Position+len(result.IDs) < result.Total,
+	}
+	if len(result.IDs) == 0 {
+		return pageOut, nil
+	}
+
+	fetched, err := s.upstream.GetEmails(ctx, toJMAP(creds), account, jmap.GetEmailsOptions{IDs: result.IDs})
+	if err != nil {
+		return Page{}, mapError(err)
+	}
+	byID := make(map[string]jmap.Email, len(fetched))
+	for _, e := range fetched {
+		byID[e.ID] = e
+	}
+	for _, id := range result.IDs {
+		if e, ok := byID[id]; ok {
+			pageOut.Messages = append(pageOut.Messages, MapSummary(account, e))
+		}
+	}
+	if pageOut.HasMore {
+		pageOut.NextCursor = ids.Cursor(account, result.IDs[len(result.IDs)-1])
+	}
+	return pageOut, nil
 }
 
 // Attachments lists the downloadable files on a message. The caller's account

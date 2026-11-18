@@ -81,8 +81,10 @@ type Email struct {
 // service only ever passes one back that it received from the server.
 type Query struct {
 	MailboxID string
-	Limit     int
-	Anchor    string
+	// Text is the caller's search phrase. Empty means no text filter.
+	Text   string
+	Limit  int
+	Anchor string
 }
 
 // QueryResult is one page of query results. Total and Position let the caller
@@ -236,9 +238,16 @@ func mailboxSetError(action, vendorType string) error {
 
 // QueryEmails returns one page of message identifiers, newest first.
 func (c *Client) QueryEmails(ctx context.Context, creds Credentials, accountID string, q Query) (QueryResult, error) {
+	filter := map[string]any{}
+	if q.MailboxID != "" {
+		filter["inMailbox"] = q.MailboxID
+	}
+	if q.Text != "" {
+		filter["text"] = q.Text
+	}
 	args := map[string]any{
 		"accountId":      accountID,
-		"filter":         map[string]any{"inMailbox": q.MailboxID},
+		"filter":         filter,
 		"sort":           []map[string]any{{"property": "receivedAt", "isAscending": false}},
 		"limit":          q.Limit,
 		"calculateTotal": true,
