@@ -16,7 +16,7 @@
 
 - [x] 3.1 Verify a reply draft over IMAP: create the reply through the HTTP API, then fetch its `References` and `In-Reply-To` headers and confirm the draft appears in Drafts; record the command and result in `docs/integration-surface.md`.
 - [x] 3.2 Run `./app/scripts/go.sh` and `openspec validate --all --strict`; verify formatting, vet, unit tests, and all specs pass, and state any check that could not run.
-- [ ] 3.3 Review `git status` and the full diff for secrets, unbounded retries, unhandled errors, and data-loss paths; commit on the `mailflow-drafts-and-replies` branch with the verification result in the message and verify the tree is clean.
+- [x] 3.3 Review `git status` and the full diff for secrets, unbounded retries, unhandled errors, and data-loss paths; commit on the `mailflow-drafts-and-replies` branch with the verification result in the message and verify the tree is clean.
 
 ## Workflow follow-up
 
