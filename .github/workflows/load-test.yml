@@ -1,0 +1,99 @@
+name: Load test — mailflow API
+
+# Manual only. A load run must never gate a pull request or fire on a deploy.
+# The generator is ephemeral, reads only, and leaves no files or containers.
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Hold duration (10s to 5m)'
+        required: false
+        default: '1m'
+      vus:
+        description: 'Virtual users (1 to 50)'
+        required: false
+        default: '10'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mailflow-load
+  cancel-in-progress: false
+
+jobs:
+  load:
+    runs-on: [self-hosted, radxa]
+    environment: production
+    timeout-minutes: 10
+    env:
+      # The demo account address is public; its password is an Environment
+      # secret and is masked by GitHub Actions.
+      MAILFLOW_USER: bob@mailflow.test
+      MAILFLOW_PASSWORD: ${{ secrets.MAIL_ACCOUNT_BOB_PASSWORD }}
+      VUS: ${{ inputs.vus }}
+      DURATION: ${{ inputs.duration }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: validate inputs and run the load check
+        run: |
+          set -euo pipefail
+
+          case "$VUS" in
+            ''|*[!0-9]*)
+              echo "error: VUS must be a number between 1 and 50, got '$VUS'" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$VUS" -lt 1 ] || [ "$VUS" -gt 50 ]; then
+            echo "error: VUS must be between 1 and 50, got '$VUS'" >&2
+            exit 1
+          fi
+
+          case "$DURATION" in
+            *s) seconds="${DURATION%s}" ;;
+            *m) seconds="$(( ${DURATION%m} * 60 ))" ;;
+            *)
+              echo "error: DURATION must look like 30s or 2m, got '$DURATION'" >&2
+              exit 1
+              ;;
+          esac
+          case "$seconds" in
+            ''|*[!0-9]*)
+              echo "error: DURATION must be a whole number of seconds or minutes" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$seconds" -lt 10 ] || [ "$seconds" -gt 300 ]; then
+            echo "error: DURATION must be between 10s and 5m, got '$DURATION'" >&2
+            exit 1
+          fi
+
+          # Stream the script into the pinned image: the runner checkout is not
+          # visible to the host Docker daemon. The container is removed on exit.
+          cat app/scripts/load/api.js \
+            | docker run --rm -i \
+                --network mailflow-app-data \
+                -e BASE_URL=http://api:8080 \
+                -e "VUS=$VUS" \
+                -e "DURATION=$DURATION" \
+                -e "MAILFLOW_USER=$MAILFLOW_USER" \
+                -e "MAILFLOW_PASSWORD=$MAILFLOW_PASSWORD" \
+                grafana/k6:0.54.0 run - 2>&1 \
+            | tee "$RUNNER_TEMP/k6-summary.txt"
+
+          {
+            echo '### Load test summary'
+            echo ''
+            echo "Duration: ${DURATION}; virtual users: ${VUS}"
+            echo ''
+            echo 'Client-side result (k6):'
+            echo '```'
+            cat "$RUNNER_TEMP/k6-summary.txt"
+            echo '```'
+            echo ''
+            echo 'Server-side result: inspect the Mailflow API dashboard in Grafana'
+            echo 'over the run window for request rate, 5xx and p95 by route.'
+          } >> "$GITHUB_STEP_SUMMARY"
