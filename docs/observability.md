@@ -58,5 +58,9 @@ reported target `mailflow-api` as up, and Grafana's API returned the "Mailflow
 API" dashboard with three panels. The unit test asserts that a request whose raw
 path contains an address is recorded only under its route pattern.
 
+A controlled traffic spike for this dashboard can be produced with the manual
+load check in [`docs/load-testing.md`](load-testing.md). It uses the existing
+metrics as the server-side view and does not add exporters or dashboard changes.
+
 Out of scope: alerting, SLOs, log aggregation, tracing the mail server or worker,
 remote metric storage, and high-cardinality labels.
