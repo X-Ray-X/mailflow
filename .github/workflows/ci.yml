@@ -162,22 +162,25 @@ jobs:
           fi
 
       # Build and test steps use pinned toolchain images so the verdict does not
-      # depend on what happens to be installed on the self-hosted runner.
+      # depend on what happens to be installed on the self-hosted runner. Source
+      # is streamed on stdin, not bind-mounted: the runner's checkout is inside
+      # a container and the host Docker daemon cannot resolve its path.
       - name: Go formatting, vet and unit tests
         run: ./app/scripts/go.sh
 
       - name: Web client build and unit tests
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/web:/src" -w /src node:22-alpine \
-            npm ci --no-audit --no-fund
-          docker run --rm -v "$PWD/web:/src" -w /src node:22-alpine \
-            sh -c 'npm run build && npm test'
+          COPYFILE_DISABLE=1 tar -cf - --exclude=node_modules --exclude=dist -C web . \
+            | docker run --rm -i -w /src node:22-alpine \
+                sh -c 'tar -xf - -C /src && npm ci --no-audit --no-fund && npm run build && npm test'
 
       - name: Python verification scripts compile
         run: python3 -m py_compile app/scripts/verify-api.py
 
       - name: OpenSpec validates
         run: |
-          docker run --rm -e OPENSPEC_TELEMETRY=0 -v "$PWD:/src" -w /src node:22-alpine \
-            npx --yes @fission-ai/openspec@2.0.0 validate --all --strict
+          COPYFILE_DISABLE=1 tar -cf - --exclude=.git --exclude=node_modules --exclude=dist \
+              --exclude=deploy/mail/data -C . . \
+            | docker run --rm -i -e OPENSPEC_TELEMETRY=0 -w /src node:22-alpine \
+                sh -c 'tar -xf - -C /src && npx --yes @fission-ai/openspec@2.0.0 validate --all --strict'

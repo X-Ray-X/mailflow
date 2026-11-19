@@ -8,6 +8,7 @@ deploy/app/.env
 
 # Tooling noise
 .DS_Store
+._*
 *.log
 web/node_modules/
 web/dist/
