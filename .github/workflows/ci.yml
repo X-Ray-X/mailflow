@@ -80,6 +80,13 @@ jobs:
 
           c = json.load(sys.stdin)
           services = c["services"]
+
+          # The runner checkout is not visible to the homelab Docker daemon.
+          # Every service must get its config from an image or a named volume.
+          for name, service in services.items():
+              binds = [m for m in (service.get("volumes") or []) if m.get("type") == "bind"]
+              assert not binds, (name, binds)
+
           expected_services = {"api", "db", "web", "rabbitmq", "worker", "prometheus", "grafana"}
           assert set(services) == expected_services, sorted(services)
           api, db, web = services["api"], services["db"], services["web"]

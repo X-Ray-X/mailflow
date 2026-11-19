@@ -38,8 +38,12 @@ docker compose up -d
 | Prometheus | `http://127.0.0.1:9090/` |
 | Grafana | `http://127.0.0.1:3000/` |
 
-Prometheus scrapes `api:8080` every 15 seconds from `prometheus.yml`. Grafana has
-a provisioned Prometheus datasource and a read-only "Mailflow API" dashboard.
+Prometheus scrapes `api:8080` every 15 seconds. Its `prometheus.yml` and the
+Grafana provisioning files are copied into small derived images at deploy time;
+the Compose project has no host bind mounts because the self-hosted runner's
+checkout is not visible to the homelab Docker daemon. A config change therefore
+needs a rebuild and redeploy. Grafana has a provisioned Prometheus datasource
+and a read-only "Mailflow API" dashboard.
 Anonymous viewer access is enabled only because the port is loopback; the
 Compose gate fails if either observability port is published on all interfaces.
 Prometheus history lives in the `mailflow-app-prometheus` volume and is not
