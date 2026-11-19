@@ -43,12 +43,20 @@ and then runs, in pinned toolchain images:
 
 ```sh
 ./app/scripts/go.sh
-docker run --rm -v "$PWD/web:/src" -w /src node:22-alpine npm ci
-docker run --rm -v "$PWD/web:/src" -w /src node:22-alpine sh -c 'npm run build && npm test'
+COPYFILE_DISABLE=1 tar -cf - --exclude=node_modules --exclude=dist -C web . \
+  | docker run --rm -i -w /src node:22-alpine \
+      sh -c 'tar -xf - -C /src && npm ci && npm run build && npm test'
 python3 -m py_compile app/scripts/verify-api.py
-docker run --rm -e OPENSPEC_TELEMETRY=0 -v "$PWD:/src" -w /src node:22-alpine \
-  npx --yes @fission-ai/openspec@2.0.0 validate --all --strict
+COPYFILE_DISABLE=1 tar -cf - --exclude=.git -C . . \
+  | docker run --rm -i -e OPENSPEC_TELEMETRY=0 -w /src node:22-alpine \
+      sh -c 'tar -xf - -C /src && npx --yes @fission-ai/openspec@2.0.0 validate --all --strict'
 ```
+
+Source is streamed on stdin rather than bind-mounted: the self-hosted runner
+runs in a container, so the host Docker daemon cannot resolve the checkout path.
+`COPYFILE_DISABLE=1` stops macOS tar from emitting extended attributes that GNU
+tar inside the image turns into `._*` files; the `--exclude` flags keep local
+build output out of the stream.
 
 These prove the service compiles and passes unit tests, the client builds and
 passes its tests, the verification scripts parse, and the specs are coherent. The
