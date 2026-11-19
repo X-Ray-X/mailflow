@@ -73,6 +73,19 @@ jobs:
           docker build --platform linux/arm64 -t "$web_image" web/
           echo "MAILFLOW_WEB_IMAGE=$web_image" >> "$GITHUB_ENV"
 
+          # Observability config is copied into small derived images. Bind
+          # mounts would point at the runner's checkout, which the host daemon
+          # cannot resolve.
+          prom_image="mailflow-prometheus:${GITHUB_SHA::12}"
+          docker build --platform linux/arm64 -f deploy/app/prometheus.Dockerfile \
+            -t "$prom_image" deploy/app
+          echo "PROMETHEUS_IMAGE=$prom_image" >> "$GITHUB_ENV"
+
+          grafana_image="mailflow-grafana:${GITHUB_SHA::12}"
+          docker build --platform linux/arm64 -f deploy/app/grafana.Dockerfile \
+            -t "$grafana_image" deploy/app
+          echo "GRAFANA_IMAGE=$grafana_image" >> "$GITHUB_ENV"
+
       - name: prepare the deploy environment
         run: |
           set -euo pipefail
@@ -139,6 +152,8 @@ jobs:
           sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
           sed -i "s|^MAILFLOW_API_PORT=.*|MAILFLOW_API_PORT=${port}|" .env
           sed -i "s|^MAILFLOW_WEB_IMAGE=.*|MAILFLOW_WEB_IMAGE=${MAILFLOW_WEB_IMAGE}|" .env
+          sed -i "s|^PROMETHEUS_IMAGE=.*|PROMETHEUS_IMAGE=${PROMETHEUS_IMAGE}|" .env
+          sed -i "s|^GRAFANA_IMAGE=.*|GRAFANA_IMAGE=${GRAFANA_IMAGE}|" .env
           sed -i "s|^MAILFLOW_WEB_PORT=.*|MAILFLOW_WEB_PORT=${web_port}|" .env
           sed -i "s|^MAILFLOW_DB_PASSWORD=.*|MAILFLOW_DB_PASSWORD=${escaped}|" .env
           sed -i "s|^RABBITMQ_PASSWORD=.*|RABBITMQ_PASSWORD=${broker_password}|" .env
