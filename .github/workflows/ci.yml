@@ -88,7 +88,10 @@ jobs:
               ports = service.get("ports") or []
               assert ports and all(p.get("host_ip") == "127.0.0.1" for p in ports), (name, ports)
               assert "data" in (service.get("networks") or {}), (name, service.get("networks"))
-              assert not [m for m in (service.get("volumes") or []) if "mail" in str(m)], name
+              # Match the mail project path, not the substring "mail", which
+              # also appears in the repository directory name "mailflow".
+              assert not [m for m in (service.get("volumes") or [])
+                          if "deploy/mail/" in str(m).replace("\\", "/")], name
           rabbit, worker = services["rabbitmq"], services["worker"]
 
           # The broker and worker are private: no host ports, no bind mounts,
@@ -104,7 +107,8 @@ jobs:
           assert api_ports and all(p.get("host_ip") == "127.0.0.1" for p in api_ports), api_ports
           web_ports = web.get("ports") or []
           assert web_ports and all(p.get("host_ip") == "127.0.0.1" for p in web_ports), web_ports
-          assert not [m for m in (web.get("volumes") or []) if "mail" in str(m)], web.get("volumes")
+          assert not [m for m in (web.get("volumes") or [])
+                      if "deploy/mail/" in str(m).replace("\\", "/")], web.get("volumes")
           assert "frontend" in (web.get("networks") or {}), web.get("networks")
           assert "data" in (web.get("networks") or {}), web.get("networks")
           frontend = c["networks"]["frontend"]
