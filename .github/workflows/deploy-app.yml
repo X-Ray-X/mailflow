@@ -243,7 +243,7 @@ jobs:
             web_status="$(docker inspect "$APP_WEB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             queue_status="$(docker inspect "$APP_QUEUE_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             worker_status="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo missing)"
-            worker_restarts="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.State.RestartCount}}' 2>/dev/null || echo missing)"
+            worker_restarts="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.RestartCount}}' 2>/dev/null || echo missing)"
             # A container with restart: unless-stopped reports Running between
             # restarts, so Running alone is not evidence of a healthy worker.
             if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$web_status" = "healthy" ] && [ "$queue_status" = "healthy" ] && [ "$worker_status" = "running" ] && [ "$worker_restarts" = "0" ]; then
