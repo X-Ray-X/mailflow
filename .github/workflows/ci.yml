@@ -16,7 +16,11 @@ jobs:
   # Gate 1 — compose project renders cleanly and matches the declaration in the
   # repository. Nothing here touches the stack.
   compose-contract:
-    runs-on: [self-hosted, radxa]
+    # PR-triggered checks run on GitHub-hosted runners. A public repo lets
+    # anyone open a PR whose workflow file would otherwise execute on the
+    # homelab host with Docker access. Self-hosted runners are reserved for
+    # trusted push/dispatch deploys.
+    runs-on: ubuntu-latest
     steps:
       - name: checkout
         uses: actions/checkout@v4

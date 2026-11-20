@@ -23,7 +23,6 @@ env:
   # Optional host address for the run summary only. Set it as a "production"
   # environment variable; leave it unset and the summary omits it. Not a
   # secret: it is printed in the summary, and secrets would be masked.
-  MAIL_TAILNET_IP: ${{ vars.MAIL_TAILNET_IP }}
 
 jobs:
   deploy:
@@ -139,13 +138,10 @@ jobs:
 
       - name: write run summary
         run: |
-          if [ -n "${MAIL_TAILNET_IP:-}" ]; then
-            tailnet="mail.mailflow.test (tailnet IP ${MAIL_TAILNET_IP})"
-          else
-            tailnet="mail.mailflow.test"
-          fi
+          # The tailnet address is operational detail, not portfolio content;
+          # public workflow logs should show only the canonical hostname.
           cat >> $GITHUB_STEP_SUMMARY <<EOF
           Mailflow deployed from ${{ github.sha }}
-          Tailnet: ${tailnet}
+          Tailnet: mail.mailflow.test
           Services: IMAPS 993 · SMTP 465 · HTTPS/JMAP 443 (loopback) · setup 8089 (loopback)
           EOF

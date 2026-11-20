@@ -8,7 +8,18 @@ on:
 
 jobs:
   pr_agent_job:
-    if: github.event.sender.type != 'Bot'
+    # Advisory reviews may be triggered only by same-repo PRs or by trusted
+    # comment authors. Anonymous issue_comment events on a public repo must
+    # not reach the production environment or its model key.
+    if: >-
+      github.event.sender.type != 'Bot' &&
+      (
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'issue_comment' &&
+         github.event.comment != null &&
+         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      )
     runs-on: ubuntu-latest
     # The free-tier GEMINI_API_KEY lives in the production Environment. The
     # environment has no protection rules, so no approval gate is added.
