@@ -197,3 +197,52 @@ rely on a registry or on files outside the checked-out source.
 - **WHEN** the deploy workflow finishes building
 - **THEN** all four image tags carry the commit SHA and Compose renders with
   those tags
+
+### Requirement: Deploy health checks read real inspect fields
+
+The application deploy health loop MUST read a container's restart count from
+the top-level `RestartCount` field of `docker inspect`. A template error or an
+empty value MUST NOT cause a healthy worker to be reported as unhealthy.
+
+#### Scenario: The worker has not restarted
+
+- **WHEN** `docker inspect` reports a top-level `RestartCount` of zero and the
+  worker is running
+- **THEN** the worker satisfies the health gate
+
+#### Scenario: The inspect template is wrong
+
+- **WHEN** a health template names a field that does not exist
+- **THEN** the deploy does not treat the empty result as a successful check
+
+### Requirement: Worker credentials must match the broker
+
+The application deploy MUST build the worker's AMQP URL from the configured
+`RABBITMQ_USER` and generated password. It MUST fail before starting services
+if the configured user and the generated URL user differ.
+
+#### Scenario: The broker user is changed
+
+- **WHEN** an operator sets `RABBITMQ_USER` in the generated environment
+- **THEN** the worker's AMQP URL uses that same username
+
+#### Scenario: The URL user is inconsistent
+
+- **WHEN** the generated URL would use a different username than the broker
+- **THEN** the deploy fails with a message naming the mismatch
+
+### Requirement: A restarting worker fails the deploy
+
+The deploy health check MUST verify that the worker is running and has not
+restarted. A container that is merely `Running` while cycling through restarts
+MUST NOT satisfy the gate.
+
+#### Scenario: The worker cannot authenticate
+
+- **WHEN** the worker exits repeatedly after a broker authentication failure
+- **THEN** the deploy fails and includes the worker's recent logs
+
+#### Scenario: The worker is healthy
+
+- **WHEN** the worker process stays up without restarting
+- **THEN** the deploy proceeds to the mail-unchanged assertion and summary
