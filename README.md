@@ -187,6 +187,7 @@ updates, and a vendor-vocabulary scan over reads and writes.
 Clients must resolve `mail.mailflow.test` to the host and trust the internal CA
 at `deploy/mail/data/tls/ca.pem`. Do not disable certificate verification.
 
+- Architecture and infrastructure diagrams, state ownership, claim → check map: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - Day-to-day operation, TLS, backup/restore, upgrade: [`docs/mail-infrastructure.md`](docs/mail-infrastructure.md)
 - Observed JMAP surface, capabilities, events: [`docs/integration-surface.md`](docs/integration-surface.md)
 - Published contract, configuration, run recipe: [`docs/api.md`](docs/api.md)
