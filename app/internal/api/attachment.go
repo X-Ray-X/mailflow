@@ -22,6 +22,16 @@ type attachmentsResponse struct {
 	Attachments []attachmentDTO `json:"attachments"`
 }
 
+// Attachments godoc
+// @Summary List attachment metadata for a message
+// @Tags attachments
+// @Security BasicAuth
+// @Produce json
+// @Param messageID path string true "Mailflow message identifier"
+// @Success 200 {object} attachmentsResponse
+// @Failure 401 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/messages/{messageID}/attachments [get]
 // attachments lists the downloadable files of one message.
 func (s *Server) attachments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
@@ -44,6 +54,18 @@ func (s *Server) attachments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// DownloadAttachment godoc
+// @Summary Download one attachment by position
+// @Tags attachments
+// @Security BasicAuth
+// @Produce octet-stream
+// @Param messageID path string true "Mailflow message identifier"
+// @Param position path int true "Zero-based attachment position"
+// @Success 200 {file} file "Attachment bytes"
+// @Failure 400 {object} errorBody
+// @Failure 401 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/messages/{messageID}/attachments/{position} [get]
 // downloadAttachment streams one addressed attachment. A declared length lets
 // a client detect a download that ended early, and the bounded copy keeps an
 // upstream response from growing without limit.

@@ -61,6 +61,13 @@ type healthResponse struct {
 	Status string `json:"status"`
 }
 
+// Health godoc
+// @Summary Service health
+// @Description Unauthenticated health check, independent of the mail server.
+// @Tags system
+// @Produce json
+// @Success 200 {object} healthResponse
+// @Router /healthz [get]
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return
@@ -81,6 +88,15 @@ func (s *Server) mailboxes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ListMailboxes godoc
+// @Summary List mailboxes
+// @Description All mailboxes of the caller's account.
+// @Tags mailboxes
+// @Security BasicAuth
+// @Produce json
+// @Success 200 {object} mailboxesResponse
+// @Failure 401 {object} errorBody
+// @Router /v1/mailboxes [get]
 func (s *Server) listMailboxes(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return
@@ -116,6 +132,19 @@ func (s *Server) mailboxByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Messages godoc
+// @Summary List messages in a mailbox
+// @Tags messages
+// @Security BasicAuth
+// @Produce json
+// @Param mailboxID path string true "Mailflow mailbox identifier"
+// @Param limit query int false "Page size"
+// @Param cursor query string false "Next cursor from a previous page"
+// @Success 200 {object} messagesResponse
+// @Failure 400 {object} errorBody
+// @Failure 401 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/mailboxes/{mailboxID}/messages [get]
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return
@@ -161,6 +190,16 @@ func (s *Server) messageByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Message godoc
+// @Summary Read one message with its text body
+// @Tags messages
+// @Security BasicAuth
+// @Produce json
+// @Param messageID path string true "Mailflow message identifier"
+// @Success 200 {object} messageDTO
+// @Failure 401 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/messages/{messageID} [get]
 func (s *Server) message(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGet(w, r) {
 		return

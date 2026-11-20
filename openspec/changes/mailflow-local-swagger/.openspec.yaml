@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-20
+# Developer tooling only: no published behavior changes, no specs delta.
+skip_specs: true

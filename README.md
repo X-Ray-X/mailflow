@@ -193,6 +193,7 @@ at `deploy/mail/data/tls/ca.pem`. Do not disable certificate verification.
 - Application database, pin, backup/restore, retention: [`docs/application-database.md`](docs/application-database.md)
 - Metrics, tracing, dashboards: [`docs/observability.md`](docs/observability.md)
 - Bounded, read-only load checks: [`docs/load-testing.md`](docs/load-testing.md)
+- Local interactive API explorer: [`docs/api.md`](docs/api.md#local-api-explorer)
 
 ## Specifications
 

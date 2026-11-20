@@ -71,6 +71,20 @@ type draftResponse struct {
 	ID string `json:"id"`
 }
 
+// Send godoc
+// @Summary Send a plain-text message
+// @Description Requires an idempotency key; the sender is the authenticated account.
+// @Tags messages
+// @Security BasicAuth
+// @Accept json
+// @Produce json
+// @Param Idempotency-Key header string true "Idempotency key"
+// @Param request body sendRequest true "Message to send"
+// @Success 201 {object} sendResponse
+// @Failure 400 {object} errorBody
+// @Failure 409 {object} errorBody
+// @Failure 422 {object} errorBody
+// @Router /v1/messages [post]
 // send accepts a plain-text message for delivery. The idempotency claim comes
 // first, so a retry cannot submit twice, and it is released only when the send
 // certainly did not happen.
@@ -153,6 +167,18 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, sendResponse{ID: id})
 }
 
+// UpdateMessage godoc
+// @Summary Patch a message's flags and optionally move it
+// @Tags messages
+// @Security BasicAuth
+// @Accept json
+// @Produce json
+// @Param messageID path string true "Mailflow message identifier"
+// @Param request body messagePatchRequest true "Desired state"
+// @Success 200 {object} messageDTO
+// @Failure 400 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/messages/{messageID} [patch]
 // updateMessage applies a desired-state message patch: flags, a move, or both.
 // Repeating the same patch changes nothing, so no idempotency key is involved.
 func (s *Server) updateMessage(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +209,15 @@ func (s *Server) updateMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toMessageSummaryDTO(summary))
 }
 
+// DeleteMessage godoc
+// @Summary Move a message to trash
+// @Tags messages
+// @Security BasicAuth
+// @Param messageID path string true "Mailflow message identifier"
+// @Success 204 {string} string "No Content"
+// @Failure 401 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/messages/{messageID} [delete]
 // deleteMessage moves the message to trash. It never erases it, so the caller
 // can restore it by moving it out again.
 func (s *Server) deleteMessage(w http.ResponseWriter, r *http.Request) {
@@ -193,6 +228,17 @@ func (s *Server) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w)
 }
 
+// CreateMailbox godoc
+// @Summary Create a custom mailbox
+// @Tags mailboxes
+// @Security BasicAuth
+// @Accept json
+// @Produce json
+// @Param request body mailboxRequest true "Mailbox name"
+// @Success 201 {object} mailboxResponse
+// @Failure 400 {object} errorBody
+// @Failure 409 {object} errorBody
+// @Router /v1/mailboxes [post]
 // createMailbox creates a top-level custom mailbox. The name is the natural
 // key, so a retry cannot make a second one; it answers already_exists instead.
 func (s *Server) createMailbox(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +255,18 @@ func (s *Server) createMailbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, mailboxResponse{ID: id})
 }
 
+// RenameMailbox godoc
+// @Summary Rename a custom mailbox
+// @Tags mailboxes
+// @Security BasicAuth
+// @Accept json
+// @Param mailboxID path string true "Mailflow mailbox identifier"
+// @Param request body mailboxRequest true "Resulting name"
+// @Success 204 {string} string "No Content"
+// @Failure 400 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Failure 409 {object} errorBody
+// @Router /v1/mailboxes/{mailboxID} [patch]
 func (s *Server) renameMailbox(w http.ResponseWriter, r *http.Request) {
 	var req mailboxRequest
 	if err := decodeJSON(w, r, &req, maxMailboxBody); err != nil {
@@ -222,6 +280,16 @@ func (s *Server) renameMailbox(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w)
 }
 
+// DeleteMailbox godoc
+// @Summary Delete an empty custom mailbox
+// @Tags mailboxes
+// @Security BasicAuth
+// @Param mailboxID path string true "Mailflow mailbox identifier"
+// @Success 204 {string} string "No Content"
+// @Failure 400 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Failure 409 {object} errorBody
+// @Router /v1/mailboxes/{mailboxID} [delete]
 func (s *Server) deleteMailbox(w http.ResponseWriter, r *http.Request) {
 	if err := s.service.DeleteMailbox(r.Context(), credentials(r.Context()), r.PathValue("mailboxID")); err != nil {
 		s.fail(w, r, err)
@@ -391,6 +459,17 @@ func (s *Server) complete(account, key, messageID string) error {
 	})
 }
 
+// CreateDraft godoc
+// @Summary Save a plain-text draft
+// @Description No idempotency key; every field is optional.
+// @Tags drafts
+// @Security BasicAuth
+// @Accept json
+// @Produce json
+// @Param request body draftRequest true "Draft content"
+// @Success 201 {object} draftResponse
+// @Failure 400 {object} errorBody
+// @Router /v1/drafts [post]
 // drafts accepts a new draft. Draft creation is mailbox state with no external
 // side effect, so it takes no idempotency key; a duplicate is visible and can be
 // deleted.
@@ -419,6 +498,18 @@ func (s *Server) drafts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, draftResponse{ID: id})
 }
 
+// SendDraft godoc
+// @Summary Submit an existing draft
+// @Description Uses the send idempotency record and keeps the draft identifier.
+// @Tags drafts
+// @Security BasicAuth
+// @Param Idempotency-Key header string true "Idempotency key"
+// @Param draftID path string true "Mailflow draft identifier"
+// @Success 201 {object} draftResponse
+// @Failure 400 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Failure 409 {object} errorBody
+// @Router /v1/drafts/{draftID}/send [post]
 // sendDraft submits an existing draft. It is a send, so it claims the same
 // idempotency record a send does: a replay returns the recorded identifier and
 // a key reused for another draft is refused.
@@ -488,6 +579,18 @@ func (s *Server) sendDraft(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, draftResponse{ID: id})
 }
 
+// Reply godoc
+// @Summary Create a draft reply to a message
+// @Tags drafts
+// @Security BasicAuth
+// @Accept json
+// @Produce json
+// @Param messageID path string true "Mailflow message identifier"
+// @Param request body replyRequest true "Reply text"
+// @Success 201 {object} draftResponse
+// @Failure 400 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/messages/{messageID}/reply [post]
 // reply composes a draft answer to a message. It creates mailbox state rather
 // than submitting anything, so it takes no idempotency key.
 func (s *Server) reply(w http.ResponseWriter, r *http.Request) {

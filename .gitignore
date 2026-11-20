@@ -12,5 +12,6 @@ deploy/app/.env
 *.log
 web/node_modules/
 web/dist/
+app/docs/generated/
 __pycache__/
 *.pyc

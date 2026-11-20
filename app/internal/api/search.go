@@ -7,6 +7,21 @@ import (
 	"github.com/X-Ray-X/mailflow/app/internal/mail"
 )
 
+// Search godoc
+// @Summary Search mail by text
+// @Description Bounded, paged search using the same page shape as message listing.
+// @Tags messages
+// @Security BasicAuth
+// @Produce json
+// @Param q query string true "Non-empty search text"
+// @Param mailboxId query string false "Restrict to one Mailflow mailbox"
+// @Param limit query int false "Page size"
+// @Param cursor query string false "Next cursor from a previous page"
+// @Success 200 {object} messagesResponse
+// @Failure 400 {object} errorBody
+// @Failure 401 {object} errorBody
+// @Failure 404 {object} errorBody
+// @Router /v1/search [get]
 // search answers a text query with the same page shape a mailbox listing uses.
 // Only the contract's own parameters are accepted; a vendor filter name cannot
 // be smuggled in as a query parameter.

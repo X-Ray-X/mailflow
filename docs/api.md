@@ -36,6 +36,30 @@ Build the image:
 docker buildx build --platform linux/arm64 -t mailflow-api:dev app/
 ```
 
+## Local API explorer
+
+For local development only, an interactive Swagger UI can be generated from
+the handler annotations and served on loopback:
+
+```sh
+./app/scripts/swagger.sh
+# open http://127.0.0.1:8088/
+docker rm -f mailflow-swagger-ui   # when finished
+```
+
+The script regenerates `app/docs/generated/swagger.json` and `.yaml` from the
+comments in `app/internal/api/`, checks that all published routes are present,
+and starts an ephemeral `swaggerapi/swagger-ui` container on
+`127.0.0.1:8088`. Enter mail credentials with the **Authorize** button; nothing
+is stored in the browser, image, or repository. The generated directory is
+gitignored.
+
+This view is a developer convenience, **not** a source of truth. The
+authoritative behavior lives in `openspec/specs/`, the human contract in
+`docs/api.md`, and the executable check in `verify-api.py`. No generated file
+is committed, no Swagger route is added to the Go service, and no deployment or
+CI step depends on it.
+
 ## Quality gates
 
 A pull request is expected to pass `ci.yml`, which checks the Compose contracts
