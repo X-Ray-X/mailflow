@@ -148,6 +148,18 @@ jobs:
 
           grep -q '^MAILFLOW_DB_PASSWORD=' .env \
             || { echo "error: .env.example has no MAILFLOW_DB_PASSWORD line" >&2; exit 1; }
+
+          # The broker user comes from the generated environment too. Building
+          # the URL with a different hardcoded user makes the worker fail to
+          # authenticate even though the password is correct.
+          broker_user="$(sed -n 's/^RABBITMQ_USER=//p' .env)"
+          case "$broker_user" in
+            ''|*[!A-Za-z0-9._~-]*)
+              echo "error: RABBITMQ_USER must be a URL-safe username" >&2
+              exit 1
+              ;;
+          esac
+
           escaped="$(printf '%s' "$db_password" | sed 's/[&|\\]/\\&/g')"
           sed -i "s|^MAILFLOW_API_IMAGE=.*|MAILFLOW_API_IMAGE=${MAILFLOW_IMAGE}|" .env
           sed -i "s|^MAILFLOW_API_PORT=.*|MAILFLOW_API_PORT=${port}|" .env
@@ -157,7 +169,13 @@ jobs:
           sed -i "s|^MAILFLOW_WEB_PORT=.*|MAILFLOW_WEB_PORT=${web_port}|" .env
           sed -i "s|^MAILFLOW_DB_PASSWORD=.*|MAILFLOW_DB_PASSWORD=${escaped}|" .env
           sed -i "s|^RABBITMQ_PASSWORD=.*|RABBITMQ_PASSWORD=${broker_password}|" .env
-          sed -i "s|^MAILFLOW_RABBITMQ_URL=.*|MAILFLOW_RABBITMQ_URL=amqp://mailflow:${broker_password}@rabbitmq:5672/|" .env
+          sed -i "s|^MAILFLOW_RABBITMQ_URL=.*|MAILFLOW_RABBITMQ_URL=amqp://${broker_user}:${broker_password}@rabbitmq:5672/|" .env
+
+          url_user="$(sed -n 's|^MAILFLOW_RABBITMQ_URL=amqp://\([^:@]*\):.*|\1|p' .env)"
+          if [ "$url_user" != "$broker_user" ]; then
+            echo "error: generated AMQP URL user does not match RABBITMQ_USER" >&2
+            exit 1
+          fi
           chmod 600 .env
 
       - name: check the published port is free
@@ -224,13 +242,16 @@ jobs:
             api_status="$(docker inspect "$APP_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             web_status="$(docker inspect "$APP_WEB_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
             queue_status="$(docker inspect "$APP_QUEUE_CONTAINER" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)"
-            worker_status="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.State.Running}}' 2>/dev/null || echo missing)"
-            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$web_status" = "healthy" ] && [ "$queue_status" = "healthy" ] && [ "$worker_status" = "true" ]; then
+            worker_status="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+            worker_restarts="$(docker inspect "$APP_WORKER_CONTAINER" --format '{{.State.RestartCount}}' 2>/dev/null || echo missing)"
+            # A container with restart: unless-stopped reports Running between
+            # restarts, so Running alone is not evidence of a healthy worker.
+            if [ "$db_status" = "healthy" ] && [ "$api_status" = "healthy" ] && [ "$web_status" = "healthy" ] && [ "$queue_status" = "healthy" ] && [ "$worker_status" = "running" ] && [ "$worker_restarts" = "0" ]; then
               exit 0
             fi
             sleep 2
           done
-          echo "error: application stack did not become healthy (db=$db_status api=$api_status web=$web_status queue=$queue_status worker=$worker_status)" >&2
+          echo "error: application stack did not become healthy (db=$db_status api=$api_status web=$web_status queue=$queue_status worker=$worker_status restarts=$worker_restarts)" >&2
           docker logs --tail 50 "$APP_DB_CONTAINER" >&2 || true
           docker logs --tail 50 "$APP_CONTAINER" >&2 || true
           docker logs --tail 50 "$APP_WEB_CONTAINER" >&2 || true
