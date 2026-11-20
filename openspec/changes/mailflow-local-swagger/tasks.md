@@ -11,7 +11,7 @@
   serves the spec on `127.0.0.1:8088`.
 - [x] 1.3 Document the local workflow and the "generated, not authoritative"
   boundary in `docs/api.md` and `README.md`; verify the documented commands.
-- [ ] 1.4 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;
+- [x] 1.4 Run `./app/scripts/go.sh` and `openspec validate --all --strict`;
   review the diff for runtime changes, committed generated files, and secrets,
   then commit on the `mailflow-local-swagger` branch with the verification
   result.
